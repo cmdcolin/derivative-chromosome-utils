@@ -1,277 +1,504 @@
-import { createCanvas } from 'canvas'
-import { readFileSync, writeFileSync, mkdirSync } from 'fs'
-import { parseVcfLines } from '../src/parseBreakends.ts'
-import { deriveChromosomes } from '../src/deriveChromosomes.ts'
-import { classifyChain } from '../src/classify.ts'
-import type { Breakend, Chain } from '../src/types.ts'
+import { createCanvas, type CanvasRenderingContext2D } from 'canvas'
+import { writeFileSync, mkdirSync } from 'fs'
 
+// --- Layout constants ---
 const WIDTH = 800
-const HEIGHT = 400
-const MARGIN = { top: 60, right: 40, bottom: 60, left: 40 }
-const COLORS = {
-  bg: '#ffffff',
-  chr: '#e2e8f0',
-  chrStroke: '#94a3b8',
-  del: '#ef4444',
-  dup: '#3b82f6',
-  inv: '#f59e0b',
-  tra: '#8b5cf6',
-  complex: '#ec4899',
-  unknown: '#6b7280',
-  text: '#1e293b',
-  textLight: '#64748b',
-  breakendPlus: '#059669',
-  breakendMinus: '#dc2626',
-  segment: '#2563eb',
+const HEIGHT = 320
+const BAR_H = 32
+const BAR_X0 = 100
+const BAR_X1 = 740
+const GAP = 3 // pixel gap between segments
+const RIBBON_ALPHA = 0.18
+
+const SEG_COLORS = [
+  '#60a5fa', // blue
+  '#fb923c', // orange
+  '#4ade80', // green
+  '#c084fc', // purple
+  '#f472b6', // pink
+  '#facc15', // yellow
+]
+
+const CLS_COLORS: Record<string, string> = {
+  DEL: '#ef4444',
+  DUP: '#3b82f6',
+  INV: '#f59e0b',
+  TRA: '#8b5cf6',
+  COMPLEX: '#ec4899',
 }
 
-function colorForClass(cls: string) {
-  const map: Record<string, string> = {
-    DEL: COLORS.del,
-    DUP: COLORS.dup,
-    INV: COLORS.inv,
-    TRA: COLORS.tra,
-    COMPLEX: COLORS.complex,
-  }
-  return map[cls] ?? COLORS.unknown
+// --- Data types ---
+interface Seg {
+  label: string
+  color: string
+  proportion: number // relative width
+  deleted?: boolean
+  reversed?: boolean
 }
 
-function drawBreakendDiagram(
-  vcfPath: string,
-  outPath: string,
-  title: string,
+interface Bar {
+  label: string
+  segments: Seg[]
+}
+
+interface Conn {
+  refBar: number
+  refSeg: number
+  altBar: number
+  altSeg: number
+  reversed?: boolean
+}
+
+interface Diagram {
+  title: string
+  cls: string
+  refBars: Bar[]
+  altBars: Bar[]
+  connections: Conn[]
+}
+
+// --- Layout helpers ---
+function layoutBar(segments: Seg[]) {
+  const totalProp = segments.reduce((s, seg) => s + seg.proportion, 0)
+  const totalGap = GAP * Math.max(segments.length - 1, 0)
+  const availW = BAR_X1 - BAR_X0 - totalGap
+  let x = BAR_X0
+  return segments.map(seg => {
+    const w = (seg.proportion / totalProp) * availW
+    const result = { x, w }
+    x += w + GAP
+    return result
+  })
+}
+
+function hexToRgb(hex: string) {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return { r, g, b }
+}
+
+// --- Drawing ---
+function drawBar(
+  ctx: CanvasRenderingContext2D,
+  bar: Bar,
+  y: number,
+  layout: { x: number; w: number }[],
 ) {
-  const lines = readFileSync(vcfPath, 'utf-8').split('\n')
-  const breakends = parseVcfLines(lines)
-  const result = deriveChromosomes(breakends)
+  for (let i = 0; i < bar.segments.length; i++) {
+    const seg = bar.segments[i]!
+    const { x, w } = layout[i]!
 
-  const canvas = createCanvas(WIDTH, HEIGHT)
+    if (seg.deleted) {
+      // Dashed outline, light fill
+      ctx.fillStyle = '#f1f5f9'
+      ctx.fillRect(x, y, w, BAR_H)
+      ctx.strokeStyle = '#cbd5e1'
+      ctx.lineWidth = 1.5
+      ctx.setLineDash([4, 3])
+      ctx.strokeRect(x, y, w, BAR_H)
+      ctx.setLineDash([])
+
+      // Strikethrough
+      ctx.strokeStyle = '#94a3b8'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(x + 4, y + BAR_H / 2)
+      ctx.lineTo(x + w - 4, y + BAR_H / 2)
+      ctx.stroke()
+    } else {
+      // Filled rectangle
+      ctx.fillStyle = seg.color
+      ctx.fillRect(x, y, w, BAR_H)
+      ctx.strokeStyle = '#334155'
+      ctx.lineWidth = 1
+      ctx.strokeRect(x, y, w, BAR_H)
+    }
+
+    // Reversed arrow chevrons
+    if (seg.reversed) {
+      ctx.strokeStyle = '#334155'
+      ctx.lineWidth = 1.5
+      const chevCount = Math.max(1, Math.floor(w / 20))
+      const step = w / (chevCount + 1)
+      for (let c = 1; c <= chevCount; c++) {
+        const cx = x + step * c
+        ctx.beginPath()
+        ctx.moveTo(cx + 5, y + 6)
+        ctx.lineTo(cx - 3, y + BAR_H / 2)
+        ctx.lineTo(cx + 5, y + BAR_H - 6)
+        ctx.stroke()
+      }
+    } else if (!seg.deleted) {
+      // Forward arrow chevrons
+      ctx.strokeStyle = '#334155'
+      ctx.lineWidth = 1.5
+      const chevCount = Math.max(1, Math.floor(w / 20))
+      const step = w / (chevCount + 1)
+      for (let c = 1; c <= chevCount; c++) {
+        const cx = x + step * c
+        ctx.beginPath()
+        ctx.moveTo(cx - 5, y + 6)
+        ctx.lineTo(cx + 3, y + BAR_H / 2)
+        ctx.lineTo(cx - 5, y + BAR_H - 6)
+        ctx.stroke()
+      }
+    }
+
+    // Segment label
+    ctx.fillStyle = seg.deleted ? '#94a3b8' : '#1e293b'
+    ctx.font = 'bold 13px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    if (w > 18) {
+      ctx.fillText(seg.label, x + w / 2, y + BAR_H / 2)
+    }
+  }
+}
+
+function drawRibbon(
+  ctx: CanvasRenderingContext2D,
+  refLayout: { x: number; w: number },
+  refY: number,
+  altLayout: { x: number; w: number },
+  altY: number,
+  color: string,
+  reversed: boolean,
+) {
+  const rgb = hexToRgb(color)
+  ctx.fillStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${RIBBON_ALPHA})`
+  ctx.strokeStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.35)`
+  ctx.lineWidth = 1
+
+  const rTop = refY + BAR_H
+  const aTop = altY
+
+  const rx1 = refLayout.x
+  const rx2 = refLayout.x + refLayout.w
+  let ax1: number, ax2: number
+  if (reversed) {
+    ax1 = altLayout.x + altLayout.w
+    ax2 = altLayout.x
+  } else {
+    ax1 = altLayout.x
+    ax2 = altLayout.x + altLayout.w
+  }
+
+  ctx.beginPath()
+  ctx.moveTo(rx1, rTop)
+  ctx.bezierCurveTo(rx1, rTop + (aTop - rTop) * 0.4, ax1, aTop - (aTop - rTop) * 0.4, ax1, aTop)
+  ctx.lineTo(ax2, aTop)
+  ctx.bezierCurveTo(ax2, aTop - (aTop - rTop) * 0.4, rx2, rTop + (aTop - rTop) * 0.4, rx2, rTop)
+  ctx.closePath()
+  ctx.fill()
+  ctx.stroke()
+}
+
+function drawDiagram(diagram: Diagram, outPath: string) {
+  const refCount = diagram.refBars.length
+  const altCount = diagram.altBars.length
+  const totalBars = refCount + altCount
+  const h = 80 + totalBars * (BAR_H + 20) + (totalBars - 1) * 40 + 40
+  const canvas = createCanvas(WIDTH, Math.max(HEIGHT, h))
   const ctx = canvas.getContext('2d')
 
-  // Background
-  ctx.fillStyle = COLORS.bg
-  ctx.fillRect(0, 0, WIDTH, HEIGHT)
-
-  // Collect all chromosomes and positions for layout
-  const chrSet = new Set<string>()
-  let globalMin = Infinity
-  let globalMax = -Infinity
-  for (const b of breakends) {
-    chrSet.add(b.chr)
-    globalMin = Math.min(globalMin, b.pos)
-    globalMax = Math.max(globalMax, b.pos)
-    if (b.mateChr) {
-      chrSet.add(b.mateChr)
-    }
-    if (b.matePos !== undefined) {
-      globalMin = Math.min(globalMin, b.matePos)
-      globalMax = Math.max(globalMax, b.matePos)
-    }
-  }
-
-  const chrList = [...chrSet].sort()
-  const chrCount = chrList.length
-  const pad = (globalMax - globalMin) * 0.15 || 500
-
-  // x scale: genomic position -> pixel
-  const xMin = globalMin - pad
-  const xMax = globalMax + pad
-  const plotW = WIDTH - MARGIN.left - MARGIN.right
-  const xScale = (pos: number) =>
-    MARGIN.left + ((pos - xMin) / (xMax - xMin)) * plotW
-
-  // y positions for each chromosome track
-  const trackH = (HEIGHT - MARGIN.top - MARGIN.bottom) / Math.max(chrCount, 1)
-  const chrY = new Map<string, number>()
-  for (let i = 0; i < chrList.length; i++) {
-    chrY.set(chrList[i]!, MARGIN.top + trackH * i + trackH * 0.5)
-  }
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, WIDTH, canvas.height)
 
   // Title
-  ctx.fillStyle = COLORS.text
+  ctx.fillStyle = '#1e293b'
   ctx.font = 'bold 18px sans-serif'
   ctx.textAlign = 'center'
-  ctx.fillText(title, WIDTH / 2, 30)
+  ctx.textBaseline = 'top'
+  ctx.fillText(diagram.title, WIDTH / 2, 14)
 
-  // Classification label
-  if (result.chains.length > 0) {
-    const cls = classifyChain(result.chains[0]!)
-    ctx.fillStyle = colorForClass(cls)
-    ctx.font = 'bold 14px sans-serif'
-    ctx.fillText(`Classified: ${cls}`, WIDTH / 2, 50)
+  // Classification pill
+  const clsColor = CLS_COLORS[diagram.cls] ?? '#6b7280'
+  ctx.fillStyle = clsColor
+  ctx.font = 'bold 13px sans-serif'
+  ctx.fillText(diagram.cls, WIDTH / 2, 38)
+
+  // Compute Y positions
+  const startY = 68
+  const refYs: number[] = []
+  let curY = startY
+  for (let i = 0; i < refCount; i++) {
+    refYs.push(curY)
+    curY += BAR_H + 16
   }
 
-  // Draw chromosome tracks
-  ctx.lineWidth = 2
-  for (const [chr, y] of chrY) {
-    ctx.strokeStyle = COLORS.chrStroke
-    ctx.fillStyle = COLORS.chr
-    const x1 = xScale(xMin + pad * 0.3)
-    const x2 = xScale(xMax - pad * 0.3)
-    ctx.beginPath()
-    ctx.moveTo(x1, y)
-    ctx.lineTo(x2, y)
-    ctx.stroke()
+  const ribbonGap = 60
+  curY += ribbonGap - 16
 
-    // Chromosome label
-    ctx.fillStyle = COLORS.textLight
-    ctx.font = '13px sans-serif'
+  const altYs: number[] = []
+  for (let i = 0; i < altCount; i++) {
+    altYs.push(curY)
+    curY += BAR_H + 16
+  }
+
+  // Draw ref bars
+  const refLayouts: { x: number; w: number }[][] = []
+  for (let i = 0; i < refCount; i++) {
+    const bar = diagram.refBars[i]!
+    const y = refYs[i]!
+    const layout = layoutBar(bar.segments)
+    refLayouts.push(layout)
+
+    // Bar label
+    ctx.fillStyle = '#64748b'
+    ctx.font = '12px sans-serif'
     ctx.textAlign = 'right'
-    ctx.fillText(chr, x1 - 8, y + 4)
+    ctx.textBaseline = 'middle'
+    ctx.fillText(bar.label, BAR_X0 - 10, y + BAR_H / 2)
+
+    drawBar(ctx, bar, y, layout)
   }
 
-  // Draw breakend positions as triangles showing orientation
-  for (const b of breakends) {
-    const x = xScale(b.pos)
-    const y = chrY.get(b.chr)!
-    const size = 8
-    ctx.fillStyle =
-      b.orientation === 1 ? COLORS.breakendPlus : COLORS.breakendMinus
+  // "REF" and "ALT" labels
+  const refMidY = (refYs[0]! + refYs[refCount - 1]! + BAR_H) / 2
+  ctx.fillStyle = '#94a3b8'
+  ctx.font = 'bold 11px sans-serif'
+  ctx.textAlign = 'right'
+  ctx.textBaseline = 'middle'
+  ctx.fillText('REF', BAR_X0 - 10, refMidY - 14)
 
-    ctx.beginPath()
-    if (b.orientation === 1) {
-      // Right-pointing triangle
-      ctx.moveTo(x - size, y - size)
-      ctx.lineTo(x + size, y)
-      ctx.lineTo(x - size, y + size)
-    } else {
-      // Left-pointing triangle
-      ctx.moveTo(x + size, y - size)
-      ctx.lineTo(x - size, y)
-      ctx.lineTo(x + size, y + size)
-    }
-    ctx.closePath()
-    ctx.fill()
+  // Draw alt bars
+  const altLayouts: { x: number; w: number }[][] = []
+  for (let i = 0; i < altCount; i++) {
+    const bar = diagram.altBars[i]!
+    const y = altYs[i]!
+    const layout = layoutBar(bar.segments)
+    altLayouts.push(layout)
 
-    // Position label
-    ctx.fillStyle = COLORS.textLight
-    ctx.font = '10px sans-serif'
-    ctx.textAlign = 'center'
-    ctx.fillText(`${b.pos}`, x, y + 24)
-    ctx.fillText(b.id, x, y - 16)
+    ctx.fillStyle = '#64748b'
+    ctx.font = '12px sans-serif'
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(bar.label, BAR_X0 - 10, y + BAR_H / 2)
+
+    drawBar(ctx, bar, y, layout)
   }
 
-  // Draw SV junctions as arcs between mate pairs
-  const drawnPairs = new Set<string>()
-  for (const b of breakends) {
-    if (!b.mateId || !b.mateChr) {
-      continue
-    }
-    const key = [b.id, b.mateId].sort().join(':')
-    if (drawnPairs.has(key)) {
-      continue
-    }
-    drawnPairs.add(key)
+  const altMidY = (altYs[0]! + altYs[altCount - 1]! + BAR_H) / 2
+  ctx.fillStyle = '#94a3b8'
+  ctx.font = 'bold 11px sans-serif'
+  ctx.textAlign = 'right'
+  ctx.textBaseline = 'middle'
+  ctx.fillText('ALT', BAR_X0 - 10, altMidY - 14)
 
-    const x1 = xScale(b.pos)
-    const y1 = chrY.get(b.chr)!
-    const x2 = xScale(b.matePos!)
-    const y2 = chrY.get(b.mateChr)!
-
-    const cls = classifyChain(result.chains[0]!)
-    ctx.strokeStyle = colorForClass(cls)
-    ctx.lineWidth = 2.5
-    ctx.setLineDash([6, 3])
-
-    if (y1 === y2) {
-      // Same chromosome: draw arc above
-      const midX = (x1 + x2) / 2
-      const arcHeight = Math.min(Math.abs(x2 - x1) * 0.4, 80)
-      ctx.beginPath()
-      ctx.moveTo(x1, y1)
-      ctx.quadraticCurveTo(midX, y1 - arcHeight, x2, y2)
-      ctx.stroke()
-    } else {
-      // Different chromosomes: draw curved line
-      const midX = (x1 + x2) / 2
-      const midY = (y1 + y2) / 2
-      ctx.beginPath()
-      ctx.moveTo(x1, y1)
-      ctx.bezierCurveTo(midX - 30, y1, midX + 30, y2, x2, y2)
-      ctx.stroke()
-    }
-    ctx.setLineDash([])
+  // Draw ribbons
+  for (const conn of diagram.connections) {
+    const rLayout = refLayouts[conn.refBar]![conn.refSeg]!
+    const aLayout = altLayouts[conn.altBar]![conn.altSeg]!
+    const rY = refYs[conn.refBar]!
+    const aY = altYs[conn.altBar]!
+    const seg = diagram.refBars[conn.refBar]!.segments[conn.refSeg]!
+    drawRibbon(ctx, rLayout, rY, aLayout, aY, seg.color, conn.reversed ?? false)
   }
 
-  // Draw derivative chain segments below
-  const chainY = HEIGHT - MARGIN.bottom + 10
-  if (result.chains.length > 0) {
-    ctx.fillStyle = COLORS.textLight
-    ctx.font = '11px sans-serif'
-    ctx.textAlign = 'left'
-    ctx.fillText('Derivative chain:', MARGIN.left, chainY)
-
-    const chain = result.chains[0]!
-    const cls = classifyChain(chain)
-
-    // Show chain as: open_start → [segments] → open_end
-    let label = ''
-    if (chain.openStart) {
-      label += `${chain.openStart.chr}:${chain.openStart.pos}`
-    }
-    label += ' ⟶ '
-    if (chain.segments.length > 0) {
-      for (const seg of chain.segments) {
-        label += `[${seg.chr}:${seg.start}-${seg.end} ${seg.orientation}] `
+  // Breakpoint markers (small red triangles between ref segments)
+  for (let bi = 0; bi < refCount; bi++) {
+    const layout = refLayouts[bi]!
+    const y = refYs[bi]!
+    for (let si = 0; si < layout.length - 1; si++) {
+      const seg = diagram.refBars[bi]!.segments[si]!
+      const nextSeg = diagram.refBars[bi]!.segments[si + 1]!
+      if (seg.deleted || nextSeg.deleted) {
+        continue
       }
-      label += '⟶ '
+      const bpX = layout[si]!.x + layout[si]!.w + GAP / 2
+      ctx.fillStyle = '#ef4444'
+      ctx.beginPath()
+      ctx.moveTo(bpX, y - 6)
+      ctx.lineTo(bpX - 4, y - 12)
+      ctx.lineTo(bpX + 4, y - 12)
+      ctx.closePath()
+      ctx.fill()
     }
-    if (chain.openEnd) {
-      label += `${chain.openEnd.chr}:${chain.openEnd.pos}`
-    }
-    if (chain.isClosed) {
-      label += ' (circular)'
-    }
-
-    ctx.fillStyle = colorForClass(cls)
-    ctx.font = 'bold 12px sans-serif'
-    ctx.fillText(label, MARGIN.left, chainY + 18)
   }
 
-  // Legend
-  const legendX = WIDTH - MARGIN.right - 120
-  const legendY = MARGIN.top + 10
-  ctx.font = '11px sans-serif'
+  // Junction markers on alt bar (small lightning bolt / zigzag between adjacent alt segments from different ref sources)
+  for (let bi = 0; bi < altCount; bi++) {
+    const layout = altLayouts[bi]!
+    const y = altYs[bi]!
+    for (let si = 0; si < layout.length - 1; si++) {
+      const jx = layout[si]!.x + layout[si]!.w + GAP / 2
+      ctx.strokeStyle = clsColor
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.moveTo(jx, y + 2)
+      ctx.lineTo(jx - 3, y + BAR_H * 0.33)
+      ctx.lineTo(jx + 3, y + BAR_H * 0.66)
+      ctx.lineTo(jx, y + BAR_H - 2)
+      ctx.stroke()
+    }
+  }
 
-  ctx.fillStyle = COLORS.breakendPlus
-  ctx.fillRect(legendX, legendY, 10, 10)
-  ctx.fillStyle = COLORS.textLight
-  ctx.textAlign = 'left'
-  ctx.fillText('orientation +1', legendX + 14, legendY + 9)
-
-  ctx.fillStyle = COLORS.breakendMinus
-  ctx.fillRect(legendX, legendY + 16, 10, 10)
-  ctx.fillStyle = COLORS.textLight
-  ctx.fillText('orientation -1', legendX + 14, legendY + 25)
-
-  // Write PNG
   const buf = canvas.toBuffer('image/png')
   writeFileSync(outPath, buf)
   console.log(`Wrote ${outPath}`)
 }
 
-// Generate all visualizations
+// --- Diagram definitions ---
+
+const deletion: Diagram = {
+  title: 'Deletion — segment B is lost',
+  cls: 'DEL',
+  refBars: [
+    {
+      label: 'chr1',
+      segments: [
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 2, deleted: true },
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
+      ],
+    },
+  ],
+  altBars: [
+    {
+      label: 'der(1)',
+      segments: [
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
+      ],
+    },
+  ],
+  connections: [
+    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 },
+    { refBar: 0, refSeg: 2, altBar: 0, altSeg: 1 },
+  ],
+}
+
+const inversion: Diagram = {
+  title: 'Inversion — segment B is reversed',
+  cls: 'INV',
+  refBars: [
+    {
+      label: 'chr1',
+      segments: [
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
+      ],
+    },
+  ],
+  altBars: [
+    {
+      label: 'der(1)',
+      segments: [
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 2, reversed: true },
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
+      ],
+    },
+  ],
+  connections: [
+    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 },
+    { refBar: 0, refSeg: 1, altBar: 0, altSeg: 1, reversed: true },
+    { refBar: 0, refSeg: 2, altBar: 0, altSeg: 2 },
+  ],
+}
+
+const translocation: Diagram = {
+  title: 'Translocation — chr1 and chr2 exchange tails',
+  cls: 'TRA',
+  refBars: [
+    {
+      label: 'chr1',
+      segments: [
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 1 },
+      ],
+    },
+    {
+      label: 'chr2',
+      segments: [
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
+        { label: 'D', color: SEG_COLORS[3]!, proportion: 1 },
+      ],
+    },
+  ],
+  altBars: [
+    {
+      label: 'der(1)',
+      segments: [
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
+        { label: 'D', color: SEG_COLORS[3]!, proportion: 1 },
+      ],
+    },
+    {
+      label: 'der(2)',
+      segments: [
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 1 },
+      ],
+    },
+  ],
+  connections: [
+    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 },
+    { refBar: 1, refSeg: 1, altBar: 0, altSeg: 1 },
+    { refBar: 1, refSeg: 0, altBar: 1, altSeg: 0 },
+    { refBar: 0, refSeg: 1, altBar: 1, altSeg: 1 },
+  ],
+}
+
+const complex: Diagram = {
+  title: 'Complex — chromothripsis-like rearrangement',
+  cls: 'COMPLEX',
+  refBars: [
+    {
+      label: 'chr1',
+      segments: [
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 2 },
+        { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
+        { label: 'E', color: SEG_COLORS[4]!, proportion: 1 },
+      ],
+    },
+    {
+      label: 'chr2',
+      segments: [
+        { label: 'F', color: SEG_COLORS[5]!, proportion: 2 },
+        { label: 'G', color: '#a78bfa', proportion: 2 },
+        { label: 'H', color: '#f0abfc', proportion: 1 },
+      ],
+    },
+  ],
+  altBars: [
+    {
+      label: 'der(1)',
+      segments: [
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
+        { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
+        { label: 'E', color: SEG_COLORS[4]!, proportion: 1 },
+      ],
+    },
+    {
+      label: 'der(2)',
+      segments: [
+        { label: 'F', color: SEG_COLORS[5]!, proportion: 2 },
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
+        { label: 'H', color: '#f0abfc', proportion: 1 },
+      ],
+    },
+  ],
+  connections: [
+    // der(1): A from chr1, D from chr1, E from chr1
+    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 },
+    { refBar: 0, refSeg: 3, altBar: 0, altSeg: 1 },
+    { refBar: 0, refSeg: 4, altBar: 0, altSeg: 2 },
+    // der(2): F from chr2, B from chr1, H from chr2
+    { refBar: 1, refSeg: 0, altBar: 1, altSeg: 0 },
+    { refBar: 0, refSeg: 1, altBar: 1, altSeg: 1 },
+    { refBar: 1, refSeg: 2, altBar: 1, altSeg: 2 },
+  ],
+}
+
+// --- Generate ---
 mkdirSync('img', { recursive: true })
-
-drawBreakendDiagram(
-  'test/fixtures/deletion.vcf',
-  'img/deletion.png',
-  'Deletion (DEL) — two breakends facing inward',
-)
-drawBreakendDiagram(
-  'test/fixtures/inversion.vcf',
-  'img/inversion.png',
-  'Inversion (INV) — two breakends facing same direction',
-)
-drawBreakendDiagram(
-  'test/fixtures/translocation.vcf',
-  'img/translocation.png',
-  'Translocation (TRA) — breakends on different chromosomes',
-)
-drawBreakendDiagram(
-  'test/fixtures/complex.vcf',
-  'img/complex.png',
-  'Complex rearrangement — multi-breakpoint chain',
-)
-
-console.log('Done! Generated img/*.png')
+drawDiagram(deletion, 'img/deletion.png')
+drawDiagram(inversion, 'img/inversion.png')
+drawDiagram(translocation, 'img/translocation.png')
+drawDiagram(complex, 'img/complex.png')
+console.log('Done!')
