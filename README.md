@@ -22,7 +22,9 @@ and the reconstructed derivative genome (ALT) below. Colored segments (A, B,
 C...) represent reference regions between breakpoints. Curved ribbons connect
 each segment from its reference position to its position in the derivative.
 Chevrons indicate strand orientation (right-pointing = forward, left-pointing =
-reversed). Dashed segments in the "other" row are orphaned or lost.
+reversed). Segments lost in the rearrangement (e.g., deleted regions) are omitted
+from the derivative. A loop arrow indicates a closed-loop segment (e.g., tandem
+duplication).
 
 Usage:
 
@@ -48,6 +50,29 @@ node scripts/visualize.ts test/fixtures/deletion.vcf img/deletion.png --title "D
 ```
 
 ![Deletion](img/deletion.png)
+
+### Tandem duplication
+
+Two breakends form a self-loop: the upper position faces right (`C]chr1:1000]`)
+and the lower faces left (`[chr1:2000[A`). The junction connects the end of
+segment B back to its own start, creating a closed loop. This means B is
+traversed repeatedly — a tandem duplication. The loop arrow on the ALT bar
+indicates this. Segments A and C are disconnected since the junction severs
+their adjacency to B.
+
+```
+#CHROM  POS   ID     REF  ALT            INFO
+chr1    2000  bnd_a  C    C]chr1:1000]   SVTYPE=BND;MATEID=bnd_b;EVENT=dup1
+chr1    1000  bnd_b  A    [chr1:2000[A   SVTYPE=BND;MATEID=bnd_a;EVENT=dup1
+```
+
+Walk result: B forms a closed loop. A and C are isolated.
+
+```bash
+node scripts/visualize.ts test/fixtures/duplication.vcf img/duplication.png --title "Tandem duplication — segment B forms a loop"
+```
+
+![Duplication](img/duplication.png)
 
 ### Inversion
 
@@ -486,6 +511,69 @@ pangenome community converging on GFA/rGFA is encouraging because it provides a
 natural home for SV paths, but someone still needs to define conventions for how
 somatic SVs — with copy number, clonality, and uncertainty — map onto GFA
 concepts.
+
+## Known limitations
+
+### Walk algorithm
+
+- **One connection per port.** Each segment port (left/right) can connect to
+  exactly one other port. If multiple breakends compete for the same port (e.g.,
+  two SVs at the same genomic position), only the last one processed wins — the
+  others are silently dropped. This means overlapping or nested SVs at the exact
+  same coordinate may produce incorrect walks.
+
+- **No copy number awareness.** The walk treats every junction as traversed
+  exactly once. Tandem duplications appear as closed self-loops rather than
+  showing the duplicated segment inline (A→B→B→C). Representing multi-copy
+  segments correctly requires copy number data, which the walk algorithm does not
+  use.
+
+- **Arbitrary chromosome boundaries.** The algorithm uses 0 as the chromosome
+  start and `max_breakpoint_position + 1000` as the chromosome end. The first
+  and last segments on each chromosome therefore have artificial coordinates that
+  don't reflect real chromosome sizes.
+
+- **Exact position matching.** A breakend's mate must land exactly on a segment
+  boundary to form a connection. Imprecise SV calls where the mate position is
+  off by even 1bp will silently fail to connect. Real SV callers frequently
+  report imprecise positions (CIPOS confidence intervals), which this code
+  ignores.
+
+### Parser
+
+- **BND-only.** Only VCF records with `SVTYPE=BND` and a valid BND ALT field are
+  parsed. Non-BND SV types (DEL, DUP, INV, INS records with END fields) are
+  skipped. These would need to be converted to BND notation first.
+
+- **Requires MATEID.** Single breakends (no mate) are skipped. Some callers emit
+  single breakends for events where only one side is confidently mapped.
+
+- **Minimal VCF parsing.** The parser splits on tabs and semicolons — it does not
+  handle quoted INFO values, multi-sample VCFs, or FORMAT fields. It reads
+  CHROM, POS, ID, ALT, and INFO only.
+
+### Visualization
+
+- **Fixed canvas width.** All diagrams are 800px wide regardless of the number of
+  segments. Diagrams with many segments (>10) will have very small segment
+  boxes.
+
+- **Classification is heuristic.** The `classifyFromWalk` function applies rules
+  in a fixed priority order that can misclassify mixed events:
+  1. Any closed loop → **DUP** (even if the event also has deletions or
+     inversions)
+  2. Multiple chromosomes + a chain spanning chromosomes + ≤4 ref segments →
+     **TRA**; otherwise **COMPLEX**
+  3. Any orphan segments → **DEL**
+  4. Single chain on one chromosome with a reversed segment → **INV**
+  5. Any single-segment isolated chain → **DEL**
+  6. Fallback → **COMPLEX**
+
+  Because these rules are checked in order, an inversion with a flanking
+  deletion would be classified as DEL (orphan check fires first). A duplication
+  with an inversion would be classified as DUP (closed loop check fires first).
+  Real SVs frequently combine multiple types, and this classifier picks only
+  one.
 
 ## Tests
 

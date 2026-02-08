@@ -15,9 +15,14 @@ export interface WalkSegment {
   segmentIndex: number
 }
 
+export interface WalkChain {
+  segments: WalkSegment[]
+  isClosed: boolean
+}
+
 export interface WalkResult {
   refSegments: RefSegment[]
-  chains: WalkSegment[][]
+  chains: WalkChain[]
   orphanIndices: number[]
 }
 
@@ -156,39 +161,10 @@ export function walkBreakends(breakends: Breakend[]): WalkResult {
 
   // 4. Walk the graph
   const visited = new Set<number>()
-  const chains: WalkSegment[][] = []
+  const chains: WalkChain[] = []
 
-  // Find all free ports (no external connection) — these are chain endpoints
-  const freePorts: string[] = []
-  for (const seg of allSegments) {
-    if (!externalConnections.has(`L${seg.index}`)) {
-      freePorts.push(`L${seg.index}`)
-    }
-    if (!externalConnections.has(`R${seg.index}`)) {
-      freePorts.push(`R${seg.index}`)
-    }
-  }
-
-  // Walk from each free left port first, then free right ports
-  // Prefer starting from left ports (forward entry) for cleaner output
-  const sortedFreePorts = freePorts.sort((a, b) => {
-    const aIsLeft = a.startsWith('L')
-    const bIsLeft = b.startsWith('L')
-    if (aIsLeft && !bIsLeft) {
-      return -1
-    }
-    if (!aIsLeft && bIsLeft) {
-      return 1
-    }
-    return parseInt(a.slice(1)) - parseInt(b.slice(1))
-  })
-
-  for (const startPort of sortedFreePorts) {
-    const segIndex = parseInt(startPort.slice(1))
-    if (visited.has(segIndex)) {
-      continue
-    }
-
+  // Helper: walk from a port, collecting segments until dead end or revisit
+  function walkFrom(startPort: string): WalkSegment[] {
     const chain: WalkSegment[] = []
     let currentPort = startPort
 
@@ -222,12 +198,64 @@ export function walkBreakends(breakends: Breakend[]): WalkResult {
       currentPort = nextPort
     }
 
-    if (chain.length > 0) {
-      chains.push(chain)
+    return chain
+  }
+
+  // Find all free ports (no external connection) — these are chain endpoints
+  const freePorts: string[] = []
+  for (const seg of allSegments) {
+    if (!externalConnections.has(`L${seg.index}`)) {
+      freePorts.push(`L${seg.index}`)
+    }
+    if (!externalConnections.has(`R${seg.index}`)) {
+      freePorts.push(`R${seg.index}`)
     }
   }
 
-  // Remaining unvisited segments are orphans (could be closed loops)
+  // Walk from each free left port first, then free right ports
+  // Prefer starting from left ports (forward entry) for cleaner output
+  const sortedFreePorts = freePorts.sort((a, b) => {
+    const aIsLeft = a.startsWith('L')
+    const bIsLeft = b.startsWith('L')
+    if (aIsLeft && !bIsLeft) {
+      return -1
+    }
+    if (!aIsLeft && bIsLeft) {
+      return 1
+    }
+    return parseInt(a.slice(1)) - parseInt(b.slice(1))
+  })
+
+  for (const startPort of sortedFreePorts) {
+    const segIndex = parseInt(startPort.slice(1))
+    if (visited.has(segIndex)) {
+      continue
+    }
+
+    const segments = walkFrom(startPort)
+    if (segments.length > 0) {
+      chains.push({ segments, isClosed: false })
+    }
+  }
+
+  // 5. Walk closed loops among remaining unvisited segments
+  // A segment whose both ports have external connections but hasn't been
+  // visited yet is part of a closed loop (e.g. tandem duplication self-loop)
+  for (const seg of allSegments) {
+    if (visited.has(seg.index)) {
+      continue
+    }
+    const lPort = `L${seg.index}`
+    const rPort = `R${seg.index}`
+    if (externalConnections.has(lPort) || externalConnections.has(rPort)) {
+      const segments = walkFrom(lPort)
+      if (segments.length > 0) {
+        chains.push({ segments, isClosed: true })
+      }
+    }
+  }
+
+  // Remaining unvisited segments are true orphans
   const orphanIndices: number[] = []
   for (const seg of allSegments) {
     if (!visited.has(seg.index)) {

@@ -2,7 +2,7 @@ import { createCanvas, type CanvasRenderingContext2D } from 'canvas'
 import { writeFileSync, readFileSync, mkdirSync } from 'fs'
 import { parseVcfLines } from '../src/parseBreakends.ts'
 import { walkBreakends } from '../src/walk.ts'
-import type { WalkResult, WalkSegment } from '../src/walk.ts'
+import type { WalkResult, WalkChain, WalkSegment } from '../src/walk.ts'
 
 // --- Layout constants ---
 const WIDTH = 800
@@ -41,7 +41,11 @@ interface Seg {
   deleted?: boolean
   reversed?: boolean
   spacer?: boolean
+  looped?: boolean // closed loop (e.g. tandem duplication)
   segmentIndex?: number // links to ref segment for ribbon drawing
+  chr?: string
+  startPos?: number
+  endPos?: number
 }
 
 interface Bar {
@@ -79,6 +83,16 @@ function layoutBar(segments: Seg[]) {
   })
 }
 
+function formatPos(pos: number): string {
+  if (pos >= 1_000_000) {
+    return `${(pos / 1_000_000).toFixed(1)}Mb`
+  }
+  if (pos >= 1_000) {
+    return `${(pos / 1_000).toFixed(0)}kb`
+  }
+  return `${pos}`
+}
+
 function hexToRgb(hex: string) {
   const r = parseInt(hex.slice(1, 3), 16)
   const g = parseInt(hex.slice(3, 5), 16)
@@ -98,11 +112,14 @@ function drawBar(
     const { x, w } = layout[i]!
 
     if (seg.spacer) {
-      ctx.fillStyle = '#94a3b8'
-      ctx.font = '10px sans-serif'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'bottom'
-      ctx.fillText(seg.label, x + w / 2, y - 2)
+      // Draw label only if provided (e.g. chromosome names on ref bar)
+      if (seg.label) {
+        ctx.fillStyle = '#94a3b8'
+        ctx.font = '10px sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'bottom'
+        ctx.fillText(seg.label, x + w / 2, y - 2)
+      }
       continue
     }
 
@@ -156,6 +173,26 @@ function drawBar(
         ctx.lineTo(cx - 5, y + BAR_H - 6)
         ctx.stroke()
       }
+    }
+
+    // Loop arrow for closed-loop segments (e.g. tandem duplication)
+    if (seg.looped) {
+      ctx.strokeStyle = '#334155'
+      ctx.lineWidth = 2
+      const cx = x + w - 16
+      const cy = y - 8
+      const r = 7
+      ctx.beginPath()
+      ctx.arc(cx, cy, r, Math.PI * 0.8, Math.PI * 0.1, false)
+      ctx.stroke()
+      // Arrowhead
+      const ax = cx + r * Math.cos(Math.PI * 0.1)
+      const ay = cy + r * Math.sin(Math.PI * 0.1)
+      ctx.beginPath()
+      ctx.moveTo(ax - 4, ay - 4)
+      ctx.lineTo(ax, ay)
+      ctx.lineTo(ax + 4, ay - 3)
+      ctx.stroke()
     }
 
     // Label
@@ -225,7 +262,7 @@ function drawDiagram(diagram: Diagram, outPath: string) {
   const refCount = diagram.refBars.length
   const altCount = diagram.altBars.length
   const totalBars = refCount + altCount
-  const h = 80 + totalBars * (BAR_H + 20) + (totalBars - 1) * 40 + 40
+  const h = 80 + totalBars * (BAR_H + 20) + (totalBars - 1) * 40 + 60
   const canvas = createCanvas(WIDTH, Math.max(320, h))
   const ctx = canvas.getContext('2d')
 
@@ -246,7 +283,7 @@ function drawDiagram(diagram: Diagram, outPath: string) {
   ctx.fillText(diagram.cls, WIDTH / 2, 38)
 
   // Compute Y positions
-  const startY = 68
+  const startY = 92
   const refYs: number[] = []
   let curY = startY
   for (let i = 0; i < refCount; i++) {
@@ -323,7 +360,88 @@ function drawDiagram(diagram: Diagram, outPath: string) {
     drawRibbon(ctx, rLayout, rY, aLayout, aY, seg.color, conn.reversed ?? false)
   }
 
-  // Breakpoint markers (small red triangles between ref segments)
+  // Collect breakpoint pixel positions per ref bar for ruler tick suppression
+  const breakpointPxByBar: Map<number, number[]> = new Map()
+  for (let bi = 0; bi < refCount; bi++) {
+    const layout = refLayouts[bi]!
+    const bpPxs: number[] = []
+    for (let si = 0; si < layout.length - 1; si++) {
+      const seg = diagram.refBars[bi]!.segments[si]!
+      const nextSeg = diagram.refBars[bi]!.segments[si + 1]!
+      if (seg.deleted || nextSeg.deleted || seg.spacer || nextSeg.spacer) {
+        continue
+      }
+      bpPxs.push(layout[si]!.x + layout[si]!.w + GAP / 2)
+    }
+    breakpointPxByBar.set(bi, bpPxs)
+  }
+
+  // Continuous ruler above ref bar
+  for (let bi = 0; bi < refCount; bi++) {
+    const layout = refLayouts[bi]!
+    const y = refYs[bi]!
+    const bar = diagram.refBars[bi]!
+    const bpPxs = breakpointPxByBar.get(bi) ?? []
+
+    for (let si = 0; si < bar.segments.length; si++) {
+      const seg = bar.segments[si]!
+      if (seg.spacer || seg.startPos === undefined || seg.endPos === undefined) {
+        continue
+      }
+      const { x, w } = layout[si]!
+      const genStart = seg.startPos
+      const genEnd = seg.endPos
+      const genSpan = genEnd - genStart
+      if (genSpan <= 0 || w < 20) {
+        continue
+      }
+
+      // Choose tick interval: aim for roughly every 40-80px
+      const pxPerBp = w / genSpan
+      const rawInterval = 60 / pxPerBp
+      const magnitudes = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000, 2000000, 5000000, 10000000]
+      let interval = magnitudes[magnitudes.length - 1]!
+      for (const m of magnitudes) {
+        if (m >= rawInterval) {
+          interval = m
+          break
+        }
+      }
+
+      const firstTick = Math.ceil(genStart / interval) * interval
+      for (let pos = firstTick; pos <= genEnd; pos += interval) {
+        const px = x + ((pos - genStart) / genSpan) * w
+        // Skip ticks too close to a breakpoint (within 20px)
+        const tooClose = bpPxs.some(bpPx => Math.abs(px - bpPx) < 20)
+        if (tooClose) {
+          continue
+        }
+        // Tick line
+        ctx.strokeStyle = '#cbd5e1'
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(px, y - 2)
+        ctx.lineTo(px, y - 8)
+        ctx.stroke()
+        // Label
+        ctx.fillStyle = '#94a3b8'
+        ctx.font = '8px sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'bottom'
+        ctx.fillText(formatPos(pos), px, y - 9)
+      }
+
+      // Thin ruler line along top of segment
+      ctx.strokeStyle = '#cbd5e1'
+      ctx.lineWidth = 0.5
+      ctx.beginPath()
+      ctx.moveTo(x, y - 2)
+      ctx.lineTo(x + w, y - 2)
+      ctx.stroke()
+    }
+  }
+
+  // Breakpoint markers (small red triangles + coordinate labels between ref segments)
   for (let bi = 0; bi < refCount; bi++) {
     const layout = refLayouts[bi]!
     const y = refYs[bi]!
@@ -341,27 +459,76 @@ function drawDiagram(diagram: Diagram, outPath: string) {
       ctx.lineTo(bpX + 4, y - 12)
       ctx.closePath()
       ctx.fill()
+
+      // Coordinate label in red, angled 45 degrees
+      if (seg.endPos !== undefined) {
+        ctx.save()
+        ctx.translate(bpX, y - 14)
+        ctx.rotate(-Math.PI / 4)
+        ctx.fillStyle = '#ef4444'
+        ctx.font = 'bold 9px sans-serif'
+        ctx.textAlign = 'left'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(formatPos(seg.endPos), 0, 0)
+        ctx.restore()
+      }
     }
   }
 
-  // Junction markers on alt bars
+
+  // Continuous ruler below alt bars
   for (let bi = 0; bi < altCount; bi++) {
     const layout = altLayouts[bi]!
     const y = altYs[bi]!
-    for (let si = 0; si < layout.length - 1; si++) {
-      const seg = diagram.altBars[bi]!.segments[si]!
-      const nextSeg = diagram.altBars[bi]!.segments[si + 1]!
-      if (seg.spacer || nextSeg.spacer) {
+    const bar = diagram.altBars[bi]!
+
+    for (let si = 0; si < bar.segments.length; si++) {
+      const seg = bar.segments[si]!
+      if (seg.spacer || seg.deleted || seg.startPos === undefined || seg.endPos === undefined) {
         continue
       }
-      const jx = layout[si]!.x + layout[si]!.w + GAP / 2
-      ctx.strokeStyle = clsColor
-      ctx.lineWidth = 2
+      const { x, w } = layout[si]!
+      const genStart = seg.startPos
+      const genEnd = seg.endPos
+      const genSpan = genEnd - genStart
+      if (genSpan <= 0 || w < 20) {
+        continue
+      }
+
+      const pxPerBp = w / genSpan
+      const rawInterval = 60 / pxPerBp
+      const magnitudes = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000, 2000000, 5000000, 10000000]
+      let interval = magnitudes[magnitudes.length - 1]!
+      for (const m of magnitudes) {
+        if (m >= rawInterval) {
+          interval = m
+          break
+        }
+      }
+
+      const belowY = y + BAR_H
+      const firstTick = Math.ceil(genStart / interval) * interval
+      for (let pos = firstTick; pos <= genEnd; pos += interval) {
+        const px = x + ((pos - genStart) / genSpan) * w
+        ctx.strokeStyle = '#cbd5e1'
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(px, belowY + 2)
+        ctx.lineTo(px, belowY + 8)
+        ctx.stroke()
+        ctx.fillStyle = '#94a3b8'
+        ctx.font = '8px sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'top'
+        ctx.fillText(formatPos(pos), px, belowY + 9)
+      }
+
+      // Thin ruler line along bottom of segment
+      ctx.strokeStyle = '#cbd5e1'
+      ctx.lineWidth = 0.5
       ctx.beginPath()
-      ctx.moveTo(jx, y + 2)
-      ctx.lineTo(jx - 3, y + BAR_H * 0.33)
-      ctx.lineTo(jx + 3, y + BAR_H * 0.66)
-      ctx.lineTo(jx, y + BAR_H - 2)
+      ctx.moveTo(x, belowY + 2)
+      ctx.lineTo(x + w, belowY + 2)
       ctx.stroke()
     }
   }
@@ -387,10 +554,13 @@ function segmentColor(index: number): string {
 
 function classifyFromWalk(walk: WalkResult): string {
   const chrs = new Set(walk.refSegments.map(s => s.chr))
+  // Closed loops indicate duplications
+  if (walk.chains.some(c => c.isClosed)) {
+    return 'DUP'
+  }
   if (chrs.size > 1 && walk.chains.length > 1) {
-    // Check if any chain spans multiple chromosomes
     const hasMultiChr = walk.chains.some(chain => {
-      const chainChrs = new Set(chain.map(s => s.chr))
+      const chainChrs = new Set(chain.segments.map(s => s.chr))
       return chainChrs.size > 1
     })
     if (hasMultiChr && walk.refSegments.length <= 4) {
@@ -401,16 +571,14 @@ function classifyFromWalk(walk: WalkResult): string {
   if (walk.orphanIndices.length > 0) {
     return 'DEL'
   }
-  // Check for single-chain on one chromosome
   if (walk.chains.length === 1 && chrs.size === 1) {
     const chain = walk.chains[0]!
-    const hasReversed = chain.some(s => s.orientation === 'reverse')
+    const hasReversed = chain.segments.some(s => s.orientation === 'reverse')
     if (hasReversed) {
       return 'INV'
     }
   }
-  // Check for isolated segments (deletions)
-  if (walk.chains.some(c => c.length === 1)) {
+  if (walk.chains.some(c => c.segments.length === 1 && !c.isClosed)) {
     return 'DEL'
   }
   return 'COMPLEX'
@@ -420,6 +588,8 @@ function titleForClass(cls: string): string {
   switch (cls) {
     case 'DEL':
       return 'Deletion'
+    case 'DUP':
+      return 'Duplication'
     case 'INV':
       return 'Inversion'
     case 'TRA':
@@ -432,6 +602,10 @@ function titleForClass(cls: string): string {
 function buildDiagramFromWalk(walk: WalkResult, title?: string): Diagram {
   const { refSegments, chains, orphanIndices } = walk
   const orphanSet = new Set(orphanIndices)
+
+  // Compute spacer proportion as a fraction of total genomic span
+  const totalSpan = refSegments.reduce((s, seg) => s + (seg.end - seg.start), 0)
+  const spacerProportion = totalSpan * 0.08
 
   // Group ref segments by chromosome
   const chrSegMap = new Map<string, number[]>()
@@ -453,7 +627,7 @@ function buildDiagramFromWalk(walk: WalkResult, title?: string): Diagram {
       refBarSegs.push({
         label: chrNames.slice(0, ci + 1).join(' | '),
         color: '',
-        proportion: 0.6,
+        proportion: spacerProportion,
         spacer: true,
       })
     }
@@ -466,6 +640,9 @@ function buildDiagramFromWalk(walk: WalkResult, title?: string): Diagram {
         color: segmentColor(idx),
         proportion: seg.end - seg.start,
         segmentIndex: idx,
+        chr: seg.chr,
+        startPos: seg.start,
+        endPos: seg.end,
       })
       refSegPosition.set(idx, { barIndex: 0, segIndex: segIdx })
     }
@@ -473,20 +650,58 @@ function buildDiagramFromWalk(walk: WalkResult, title?: string): Diagram {
 
   const refBars: Bar[] = [{ label: '', segments: refBarSegs }]
 
-  // Build alt bar(s) — separate derivative chains and orphans
+  // Build alt bar(s) — separate derivative chains, loops, and orphans
   const altBars: Bar[] = []
   const connections: Conn[] = []
 
-  // Main derivative chains (multi-segment)
-  const mainChains = chains.filter(c => c.length > 1)
-  const isolatedChains = chains.filter(c => c.length === 1)
+  // Categorize chains
+  const mainChains = chains.filter(c => c.segments.length > 1 && !c.isClosed)
+  const loopChains = chains.filter(c => c.isClosed)
+  const isolatedChains = chains.filter(
+    c => c.segments.length === 1 && !c.isClosed,
+  )
 
+  // Collect loops, isolated chains, and orphans
+  const loopSegIndices = new Set<number>()
+  for (const chain of loopChains) {
+    for (const ws of chain.segments) {
+      loopSegIndices.add(ws.segmentIndex)
+    }
+  }
+  const isolatedSegIndices = new Set<number>()
+  for (const chain of isolatedChains) {
+    for (const ws of chain.segments) {
+      isolatedSegIndices.add(ws.segmentIndex)
+    }
+  }
+
+  const otherIndices: number[] = []
+  for (const chain of loopChains) {
+    for (const ws of chain.segments) {
+      otherIndices.push(ws.segmentIndex)
+    }
+  }
+  for (const chain of isolatedChains) {
+    for (const ws of chain.segments) {
+      otherIndices.push(ws.segmentIndex)
+    }
+  }
+  for (const idx of orphanIndices) {
+    otherIndices.push(idx)
+  }
+  otherIndices.sort((a, b) => a - b)
+
+  // Build a single alt bar with all chains + other segments, separated by spacers
+  const altBarIdx = altBars.length
+  const altSegs: Seg[] = []
+
+  // Add main chains
   for (let ci = 0; ci < mainChains.length; ci++) {
+    if (altSegs.length > 0) {
+      altSegs.push({ label: '', color: '', proportion: spacerProportion, spacer: true })
+    }
     const chain = mainChains[ci]!
-    const altBarIdx = altBars.length
-    const altSegs: Seg[] = []
-
-    for (const ws of chain) {
+    for (const ws of chain.segments) {
       const altSegIdx = altSegs.length
       altSegs.push({
         label: segmentLabel(ws.segmentIndex),
@@ -494,6 +709,9 @@ function buildDiagramFromWalk(walk: WalkResult, title?: string): Diagram {
         proportion: ws.end - ws.start,
         reversed: ws.orientation === 'reverse',
         segmentIndex: ws.segmentIndex,
+        chr: ws.chr,
+        startPos: ws.start,
+        endPos: ws.end,
       })
 
       const refPos = refSegPosition.get(ws.segmentIndex)
@@ -507,60 +725,56 @@ function buildDiagramFromWalk(walk: WalkResult, title?: string): Diagram {
         })
       }
     }
-
-    const chainChrs = [...new Set(chain.map(s => s.chr))]
-    const label = mainChains.length > 1 ? `der ${ci + 1}` : 'der'
-    altBars.push({ label, segments: altSegs })
   }
 
-  // Isolated and orphaned segments in a separate bar
-  const remainders: WalkSegment[] = []
-  for (const chain of isolatedChains) {
-    for (const seg of chain) {
-      remainders.push(seg)
-    }
-  }
-  for (const idx of orphanIndices) {
+  // Add other segments (loops, isolated, orphans)
+  // Skip deleted segments entirely; only add spacers between non-adjacent segments
+  let lastOtherIdx = -1
+  for (const idx of otherIndices) {
     const seg = refSegments[idx]!
-    remainders.push({
-      chr: seg.chr,
-      start: seg.start,
-      end: seg.end,
-      orientation: 'forward',
-      segmentIndex: idx,
-    })
-  }
+    const isLoop = loopSegIndices.has(idx)
+    const isIsolated = isolatedSegIndices.has(idx)
+    const isOrphan = orphanSet.has(idx)
+    const isDeleted = (isIsolated || isOrphan) && mainChains.length > 0
 
-  if (remainders.length > 0) {
-    const altBarIdx = altBars.length
-    const remSegs: Seg[] = []
-
-    for (const ws of remainders) {
-      const altSegIdx = remSegs.length
-      const isOrphan = orphanSet.has(ws.segmentIndex)
-      // Isolated single-segment chains are also "remainders"
-      const isIsolated = isolatedChains.some(c => c.length === 1 && c[0]!.segmentIndex === ws.segmentIndex)
-
-      remSegs.push({
-        label: segmentLabel(ws.segmentIndex),
-        color: segmentColor(ws.segmentIndex),
-        proportion: ws.end - ws.start,
-        deleted: isOrphan || isIsolated,
-        segmentIndex: ws.segmentIndex,
-      })
-
-      const refPos = refSegPosition.get(ws.segmentIndex)
-      if (refPos) {
-        connections.push({
-          refBar: refPos.barIndex,
-          refSeg: refPos.segIndex,
-          altBar: altBarIdx,
-          altSeg: altSegIdx,
-        })
-      }
+    if (isDeleted) {
+      continue
     }
 
-    altBars.push({ label: 'other', segments: remSegs })
+    const prevSeg = lastOtherIdx >= 0 ? refSegments[lastOtherIdx] : undefined
+    const isAdjacent = prevSeg && prevSeg.chr === seg.chr && lastOtherIdx === idx - 1
+
+    if (altSegs.length > 0 && !isAdjacent) {
+      altSegs.push({ label: '', color: '', proportion: spacerProportion, spacer: true })
+    }
+    lastOtherIdx = idx
+
+    const altSegIdx = altSegs.length
+
+    altSegs.push({
+      label: segmentLabel(idx),
+      color: segmentColor(idx),
+      proportion: seg.end - seg.start,
+      looped: isLoop,
+      segmentIndex: idx,
+      chr: seg.chr,
+      startPos: seg.start,
+      endPos: seg.end,
+    })
+
+    const refPos = refSegPosition.get(idx)
+    if (refPos) {
+      connections.push({
+        refBar: refPos.barIndex,
+        refSeg: refPos.segIndex,
+        altBar: altBarIdx,
+        altSeg: altSegIdx,
+      })
+    }
+  }
+
+  if (altSegs.length > 0) {
+    altBars.push({ label: 'der', segments: altSegs })
   }
 
   const cls = classifyFromWalk(walk)

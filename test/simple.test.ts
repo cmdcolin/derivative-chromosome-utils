@@ -113,11 +113,12 @@ describe('walkBreakends', () => {
     expect(walk.chains).toHaveLength(2)
     // Main chain: A→C
     const main = walk.chains[0]!
-    expect(main).toHaveLength(2)
-    expect(main[0]!.orientation).toBe('forward')
-    expect(main[1]!.orientation).toBe('forward')
+    expect(main.segments).toHaveLength(2)
+    expect(main.isClosed).toBe(false)
+    expect(main.segments[0]!.orientation).toBe('forward')
+    expect(main.segments[1]!.orientation).toBe('forward')
     // Isolated: B
-    expect(walk.chains[1]).toHaveLength(1)
+    expect(walk.chains[1]!.segments).toHaveLength(1)
   })
 
   it('walks inversion to produce A→B(rev)→C', () => {
@@ -126,10 +127,11 @@ describe('walkBreakends', () => {
     expect(walk.refSegments).toHaveLength(3)
     expect(walk.chains).toHaveLength(1)
     const chain = walk.chains[0]!
-    expect(chain).toHaveLength(3)
-    expect(chain[0]!.orientation).toBe('forward')
-    expect(chain[1]!.orientation).toBe('reverse')
-    expect(chain[2]!.orientation).toBe('forward')
+    expect(chain.segments).toHaveLength(3)
+    expect(chain.isClosed).toBe(false)
+    expect(chain.segments[0]!.orientation).toBe('forward')
+    expect(chain.segments[1]!.orientation).toBe('reverse')
+    expect(chain.segments[2]!.orientation).toBe('forward')
   })
 
   it('walks translocation to produce two derivative chromosomes', () => {
@@ -139,14 +141,14 @@ describe('walkBreakends', () => {
     expect(walk.chains).toHaveLength(2)
     // der1: chr1:A + chr2:D
     const der1 = walk.chains[0]!
-    expect(der1).toHaveLength(2)
-    expect(der1[0]!.chr).toBe('chr1')
-    expect(der1[1]!.chr).toBe('chr2')
+    expect(der1.segments).toHaveLength(2)
+    expect(der1.segments[0]!.chr).toBe('chr1')
+    expect(der1.segments[1]!.chr).toBe('chr2')
     // der2: chr2:C + chr1:B
     const der2 = walk.chains[1]!
-    expect(der2).toHaveLength(2)
-    expect(der2[0]!.chr).toBe('chr2')
-    expect(der2[1]!.chr).toBe('chr1')
+    expect(der2.segments).toHaveLength(2)
+    expect(der2.segments[0]!.chr).toBe('chr2')
+    expect(der2.segments[1]!.chr).toBe('chr1')
   })
 
   it('walks complex rearrangement', () => {
@@ -155,7 +157,21 @@ describe('walkBreakends', () => {
     expect(walk.refSegments).toHaveLength(8)
     // 3 multi-segment derivatives + 2 isolated segments
     expect(walk.chains).toHaveLength(5)
-    const multiChains = walk.chains.filter(c => c.length > 1)
+    const multiChains = walk.chains.filter(c => c.segments.length > 1)
     expect(multiChains).toHaveLength(3)
+  })
+
+  it('walks duplication as a closed loop', () => {
+    const breakends = parseVcfLines(loadFixture('duplication.vcf'))
+    const walk = walkBreakends(breakends)
+    expect(walk.refSegments).toHaveLength(3)
+    // A and C are isolated open chains, B is a closed loop
+    const closedLoops = walk.chains.filter(c => c.isClosed)
+    expect(closedLoops).toHaveLength(1)
+    expect(closedLoops[0]!.segments).toHaveLength(1)
+    expect(closedLoops[0]!.segments[0]!.segmentIndex).toBe(1) // B
+    // A and C are open
+    const openChains = walk.chains.filter(c => !c.isClosed)
+    expect(openChains).toHaveLength(2)
   })
 })
