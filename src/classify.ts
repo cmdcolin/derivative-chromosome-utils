@@ -15,8 +15,7 @@ export function classifyChain(chain: Chain): SVClass {
       return 'TRA'
     }
 
-    const [lower, upper] =
-      b1.pos <= b2.pos ? [b1, b2] : [b2, b1]
+    const [lower, upper] = b1.pos <= b2.pos ? [b1, b2] : [b2, b1]
 
     // DEL: lower faces right (+1), upper faces left (-1)
     if (lower.orientation === 1 && upper.orientation === -1) {

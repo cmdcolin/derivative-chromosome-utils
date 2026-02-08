@@ -14,10 +14,7 @@ function scoreTiLink(
   }
 
   // JCN_MATCH: junction copy numbers match
-  if (
-    link.breakend1.jcn !== undefined &&
-    link.breakend2.jcn !== undefined
-  ) {
+  if (link.breakend1.jcn !== undefined && link.breakend2.jcn !== undefined) {
     const diff = Math.abs(link.breakend1.jcn - link.breakend2.jcn)
     const unc1 = link.breakend1.jcnUncertainty ?? 0.5
     const unc2 = link.breakend2.jcnUncertainty ?? 0.5
@@ -81,10 +78,7 @@ function markAdjacentLinks(
   return scores
 }
 
-function makeSegment(
-  b1: Breakend,
-  b2: Breakend,
-): ChainSegment {
+function makeSegment(b1: Breakend, b2: Breakend): ChainSegment {
   if (b1.chr !== b2.chr) {
     // Cross-chromosome: just use b1's position as a point segment
     return {
@@ -148,7 +142,10 @@ export function buildChains(
           !usedBreakends.has(l.breakend1.id) ||
           !usedBreakends.has(l.breakend2.id),
       )
-      .map(l => ({ link: l, ...(scores.get(l) ?? { priority: 'NEAREST' as LinkType, score: 0 }) }))
+      .map(l => ({
+        link: l,
+        ...(scores.get(l) ?? { priority: 'NEAREST' as LinkType, score: 0 }),
+      }))
       .sort((a, b) => b.score - a.score)
 
     for (const { link } of scoredLinks) {
@@ -195,10 +192,8 @@ export function buildChains(
         const mergedSegments = [...c1.segments, seg, ...c2.segments]
         const mergedBreakends = [...c1.breakendOrder, ...c2.breakendOrder]
 
-        const newStart =
-          chain1End === 'end' ? c1.startBreakend : c1.endBreakend
-        const newEnd =
-          chain2End === 'start' ? c2.endBreakend : c2.startBreakend
+        const newStart = chain1End === 'end' ? c1.startBreakend : c1.endBreakend
+        const newEnd = chain2End === 'start' ? c2.endBreakend : c2.startBreakend
 
         chains[chain1Idx] = {
           segments: mergedSegments,

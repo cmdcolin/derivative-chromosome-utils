@@ -68,10 +68,4 @@ export interface Cluster {
   event?: string
 }
 
-export type SVClass =
-  | 'DEL'
-  | 'DUP'
-  | 'INV'
-  | 'TRA'
-  | 'COMPLEX'
-  | 'UNKNOWN'
+export type SVClass = 'DEL' | 'DUP' | 'INV' | 'TRA' | 'COMPLEX' | 'UNKNOWN'

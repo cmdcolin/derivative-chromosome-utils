@@ -30,12 +30,7 @@ export function deriveChromosomes(
   // Step 3: Filter links by CN if copy number data is available
   let tiLinks = graph.tiLinks
   if (cnSegments && cnSegments.length > 0) {
-    tiLinks = filterLinksByCN(
-      tiLinks,
-      breakends,
-      cnSegments,
-      backgroundPloidy,
-    )
+    tiLinks = filterLinksByCN(tiLinks, breakends, cnSegments, backgroundPloidy)
   }
 
   // Step 4: Build chains

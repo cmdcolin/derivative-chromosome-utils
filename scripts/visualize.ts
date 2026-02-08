@@ -34,6 +34,7 @@ interface Seg {
   proportion: number // relative width
   deleted?: boolean
   reversed?: boolean
+  spacer?: boolean // visual gap separating chromosome groups
 }
 
 interface Bar {
@@ -88,6 +89,16 @@ function drawBar(
   for (let i = 0; i < bar.segments.length; i++) {
     const seg = bar.segments[i]!
     const { x, w } = layout[i]!
+
+    if (seg.spacer) {
+      // Draw chromosome label above the spacer
+      ctx.fillStyle = '#94a3b8'
+      ctx.font = '10px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'bottom'
+      ctx.fillText(seg.label, x + w / 2, y - 2)
+      continue
+    }
 
     if (seg.deleted) {
       // Dashed outline, light fill
@@ -186,9 +197,23 @@ function drawRibbon(
 
   ctx.beginPath()
   ctx.moveTo(rx1, rTop)
-  ctx.bezierCurveTo(rx1, rTop + (aTop - rTop) * 0.4, ax1, aTop - (aTop - rTop) * 0.4, ax1, aTop)
+  ctx.bezierCurveTo(
+    rx1,
+    rTop + (aTop - rTop) * 0.4,
+    ax1,
+    aTop - (aTop - rTop) * 0.4,
+    ax1,
+    aTop,
+  )
   ctx.lineTo(ax2, aTop)
-  ctx.bezierCurveTo(ax2, aTop - (aTop - rTop) * 0.4, rx2, rTop + (aTop - rTop) * 0.4, rx2, rTop)
+  ctx.bezierCurveTo(
+    ax2,
+    aTop - (aTop - rTop) * 0.4,
+    rx2,
+    rTop + (aTop - rTop) * 0.4,
+    rx2,
+    rTop,
+  )
   ctx.closePath()
   ctx.fill()
   ctx.stroke()
@@ -303,7 +328,7 @@ function drawDiagram(diagram: Diagram, outPath: string) {
     for (let si = 0; si < layout.length - 1; si++) {
       const seg = diagram.refBars[bi]!.segments[si]!
       const nextSeg = diagram.refBars[bi]!.segments[si + 1]!
-      if (seg.deleted || nextSeg.deleted) {
+      if (seg.deleted || nextSeg.deleted || seg.spacer || nextSeg.spacer) {
         continue
       }
       const bpX = layout[si]!.x + layout[si]!.w + GAP / 2
@@ -322,6 +347,11 @@ function drawDiagram(diagram: Diagram, outPath: string) {
     const layout = altLayouts[bi]!
     const y = altYs[bi]!
     for (let si = 0; si < layout.length - 1; si++) {
+      const seg = diagram.altBars[bi]!.segments[si]!
+      const nextSeg = diagram.altBars[bi]!.segments[si + 1]!
+      if (seg.spacer || nextSeg.spacer) {
+        continue
+      }
       const jx = layout[si]!.x + layout[si]!.w + GAP / 2
       ctx.strokeStyle = clsColor
       ctx.lineWidth = 2
@@ -404,41 +434,37 @@ const translocation: Diagram = {
   cls: 'TRA',
   refBars: [
     {
-      label: 'chr1',
+      label: '',
       segments: [
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 1 },
-      ],
-    },
-    {
-      label: 'chr2',
-      segments: [
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
-        { label: 'D', color: SEG_COLORS[3]!, proportion: 1 },
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 2 },
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
+        { label: 'chr1 | chr2', color: '', proportion: 0.6, spacer: true },
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 2 },
+        { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
       ],
     },
   ],
   altBars: [
     {
-      label: 'der(1)',
+      label: '',
       segments: [
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
-        { label: 'D', color: SEG_COLORS[3]!, proportion: 1 },
-      ],
-    },
-    {
-      label: 'der(2)',
-      segments: [
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 1 },
+        { label: 'A', color: SEG_COLORS[0]!, proportion: 2 },
+        { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
+        { label: 'der(1) | der(2)', color: '', proportion: 0.6, spacer: true },
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 2 },
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
       ],
     },
   ],
   connections: [
+    // A stays in der(1)
     { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 },
-    { refBar: 1, refSeg: 1, altBar: 0, altSeg: 1 },
-    { refBar: 1, refSeg: 0, altBar: 1, altSeg: 0 },
-    { refBar: 0, refSeg: 1, altBar: 1, altSeg: 1 },
+    // D moves to der(1)
+    { refBar: 0, refSeg: 4, altBar: 0, altSeg: 1 },
+    // C stays in der(2)
+    { refBar: 0, refSeg: 3, altBar: 0, altSeg: 3 },
+    // B moves to der(2)
+    { refBar: 0, refSeg: 1, altBar: 0, altSeg: 4 },
   ],
 }
 
@@ -447,18 +473,14 @@ const complex: Diagram = {
   cls: 'COMPLEX',
   refBars: [
     {
-      label: 'chr1',
+      label: '',
       segments: [
         { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
         { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
         { label: 'C', color: SEG_COLORS[2]!, proportion: 2 },
         { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
         { label: 'E', color: SEG_COLORS[4]!, proportion: 1 },
-      ],
-    },
-    {
-      label: 'chr2',
-      segments: [
+        { label: 'chr1 | chr2', color: '', proportion: 0.6, spacer: true },
         { label: 'F', color: SEG_COLORS[5]!, proportion: 2 },
         { label: 'G', color: '#a78bfa', proportion: 2 },
         { label: 'H', color: '#f0abfc', proportion: 1 },
@@ -467,31 +489,38 @@ const complex: Diagram = {
   ],
   altBars: [
     {
-      label: 'der(1)',
+      label: '',
       segments: [
+        // Main derivative chain: A→D→G→C (one connected path through 3 junctions)
         { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
         { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
-        { label: 'E', color: SEG_COLORS[4]!, proportion: 1 },
-      ],
-    },
-    {
-      label: 'der(2)',
-      segments: [
-        { label: 'F', color: SEG_COLORS[5]!, proportion: 2 },
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
-        { label: 'H', color: '#f0abfc', proportion: 1 },
+        { label: 'G', color: '#a78bfa', proportion: 2 },
+        { label: 'C', color: SEG_COLORS[2]!, proportion: 2 },
+        {
+          label: 'derivative | remainders',
+          color: '',
+          proportion: 0.6,
+          spacer: true,
+        },
+        // Leftover tails (disconnected from main derivative)
+        { label: 'B', color: SEG_COLORS[1]!, proportion: 1.5, deleted: true },
+        { label: 'E', color: SEG_COLORS[4]!, proportion: 0.8 },
+        { label: 'F', color: SEG_COLORS[5]!, proportion: 1.5 },
+        { label: 'H', color: '#f0abfc', proportion: 0.8 },
       ],
     },
   ],
   connections: [
-    // der(1): A from chr1, D from chr1, E from chr1
-    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 },
-    { refBar: 0, refSeg: 3, altBar: 0, altSeg: 1 },
-    { refBar: 0, refSeg: 4, altBar: 0, altSeg: 2 },
-    // der(2): F from chr2, B from chr1, H from chr2
-    { refBar: 1, refSeg: 0, altBar: 1, altSeg: 0 },
-    { refBar: 0, refSeg: 1, altBar: 1, altSeg: 1 },
-    { refBar: 1, refSeg: 2, altBar: 1, altSeg: 2 },
+    // Main derivative: A→D→G→C
+    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 }, // A
+    { refBar: 0, refSeg: 3, altBar: 0, altSeg: 1 }, // D
+    { refBar: 0, refSeg: 7, altBar: 0, altSeg: 2 }, // G
+    { refBar: 0, refSeg: 2, altBar: 0, altSeg: 3 }, // C
+    // Remainders
+    { refBar: 0, refSeg: 1, altBar: 0, altSeg: 5 }, // B (lost)
+    { refBar: 0, refSeg: 4, altBar: 0, altSeg: 6 }, // E (tail)
+    { refBar: 0, refSeg: 6, altBar: 0, altSeg: 7 }, // F (tail)
+    { refBar: 0, refSeg: 8, altBar: 0, altSeg: 8 }, // H (tail)
   ],
 }
 
