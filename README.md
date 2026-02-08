@@ -11,6 +11,43 @@ ordered sequences of reference segments.
 The algorithm is adapted from the LINX chaining approach (Hartwig Medical
 Foundation) but decoupled from any specific SV caller.
 
+## Visualizations
+
+The diagrams below show how breakend pairs define structural variants.
+Triangles indicate breakend orientation (+1 green = faces right, -1 red =
+faces left). Dashed arcs connect mate pairs.
+
+### Deletion
+
+Two breakends face inward — the reference segment between them is lost.
+
+![Deletion](img/deletion.png)
+
+### Inversion
+
+Two breakends face the same direction — the segment between them is reversed.
+
+![Inversion](img/inversion.png)
+
+### Translocation
+
+Breakends on different chromosomes — sequence from one chromosome joins
+another.
+
+![Translocation](img/translocation.png)
+
+### Complex rearrangement
+
+Multiple breakend pairs across chromosomes form a multi-breakpoint chain.
+
+![Complex](img/complex.png)
+
+To regenerate these images:
+
+```bash
+node --experimental-strip-types scripts/visualize.ts
+```
+
 ## Three tiers
 
 1. **Simple pairing** — Parse BND records, match mates, build chains from SV
