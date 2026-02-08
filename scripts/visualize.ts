@@ -1,13 +1,15 @@
 import { createCanvas, type CanvasRenderingContext2D } from 'canvas'
-import { writeFileSync, mkdirSync } from 'fs'
+import { writeFileSync, readFileSync, mkdirSync } from 'fs'
+import { parseVcfLines } from '../src/parseBreakends.ts'
+import { walkBreakends } from '../src/walk.ts'
+import type { WalkResult, WalkSegment } from '../src/walk.ts'
 
 // --- Layout constants ---
 const WIDTH = 800
-const HEIGHT = 320
 const BAR_H = 32
 const BAR_X0 = 100
 const BAR_X1 = 740
-const GAP = 3 // pixel gap between segments
+const GAP = 3
 const RIBBON_ALPHA = 0.18
 
 const SEG_COLORS = [
@@ -17,6 +19,10 @@ const SEG_COLORS = [
   '#c084fc', // purple
   '#f472b6', // pink
   '#facc15', // yellow
+  '#a78bfa', // violet
+  '#f0abfc', // fuchsia
+  '#34d399', // emerald
+  '#fbbf24', // amber
 ]
 
 const CLS_COLORS: Record<string, string> = {
@@ -31,10 +37,11 @@ const CLS_COLORS: Record<string, string> = {
 interface Seg {
   label: string
   color: string
-  proportion: number // relative width
+  proportion: number
   deleted?: boolean
   reversed?: boolean
-  spacer?: boolean // visual gap separating chromosome groups
+  spacer?: boolean
+  segmentIndex?: number // links to ref segment for ribbon drawing
 }
 
 interface Bar {
@@ -91,7 +98,6 @@ function drawBar(
     const { x, w } = layout[i]!
 
     if (seg.spacer) {
-      // Draw chromosome label above the spacer
       ctx.fillStyle = '#94a3b8'
       ctx.font = '10px sans-serif'
       ctx.textAlign = 'center'
@@ -101,7 +107,6 @@ function drawBar(
     }
 
     if (seg.deleted) {
-      // Dashed outline, light fill
       ctx.fillStyle = '#f1f5f9'
       ctx.fillRect(x, y, w, BAR_H)
       ctx.strokeStyle = '#cbd5e1'
@@ -110,7 +115,6 @@ function drawBar(
       ctx.strokeRect(x, y, w, BAR_H)
       ctx.setLineDash([])
 
-      // Strikethrough
       ctx.strokeStyle = '#94a3b8'
       ctx.lineWidth = 1
       ctx.beginPath()
@@ -118,7 +122,6 @@ function drawBar(
       ctx.lineTo(x + w - 4, y + BAR_H / 2)
       ctx.stroke()
     } else {
-      // Filled rectangle
       ctx.fillStyle = seg.color
       ctx.fillRect(x, y, w, BAR_H)
       ctx.strokeStyle = '#334155'
@@ -126,7 +129,7 @@ function drawBar(
       ctx.strokeRect(x, y, w, BAR_H)
     }
 
-    // Reversed arrow chevrons
+    // Chevrons for direction
     if (seg.reversed) {
       ctx.strokeStyle = '#334155'
       ctx.lineWidth = 1.5
@@ -141,7 +144,6 @@ function drawBar(
         ctx.stroke()
       }
     } else if (!seg.deleted) {
-      // Forward arrow chevrons
       ctx.strokeStyle = '#334155'
       ctx.lineWidth = 1.5
       const chevCount = Math.max(1, Math.floor(w / 20))
@@ -156,7 +158,7 @@ function drawBar(
       }
     }
 
-    // Segment label
+    // Label
     ctx.fillStyle = seg.deleted ? '#94a3b8' : '#1e293b'
     ctx.font = 'bold 13px sans-serif'
     ctx.textAlign = 'center'
@@ -224,7 +226,7 @@ function drawDiagram(diagram: Diagram, outPath: string) {
   const altCount = diagram.altBars.length
   const totalBars = refCount + altCount
   const h = 80 + totalBars * (BAR_H + 20) + (totalBars - 1) * 40 + 40
-  const canvas = createCanvas(WIDTH, Math.max(HEIGHT, h))
+  const canvas = createCanvas(WIDTH, Math.max(320, h))
   const ctx = canvas.getContext('2d')
 
   ctx.fillStyle = '#ffffff'
@@ -269,7 +271,6 @@ function drawDiagram(diagram: Diagram, outPath: string) {
     const layout = layoutBar(bar.segments)
     refLayouts.push(layout)
 
-    // Bar label
     ctx.fillStyle = '#64748b'
     ctx.font = '12px sans-serif'
     ctx.textAlign = 'right'
@@ -279,7 +280,7 @@ function drawDiagram(diagram: Diagram, outPath: string) {
     drawBar(ctx, bar, y, layout)
   }
 
-  // "REF" and "ALT" labels
+  // "REF" label
   const refMidY = (refYs[0]! + refYs[refCount - 1]! + BAR_H) / 2
   ctx.fillStyle = '#94a3b8'
   ctx.font = 'bold 11px sans-serif'
@@ -304,6 +305,7 @@ function drawDiagram(diagram: Diagram, outPath: string) {
     drawBar(ctx, bar, y, layout)
   }
 
+  // "ALT" label
   const altMidY = (altYs[0]! + altYs[altCount - 1]! + BAR_H) / 2
   ctx.fillStyle = '#94a3b8'
   ctx.font = 'bold 11px sans-serif'
@@ -342,7 +344,7 @@ function drawDiagram(diagram: Diagram, outPath: string) {
     }
   }
 
-  // Junction markers on alt bar (small lightning bolt / zigzag between adjacent alt segments from different ref sources)
+  // Junction markers on alt bars
   for (let bi = 0; bi < altCount; bi++) {
     const layout = altLayouts[bi]!
     const y = altYs[bi]!
@@ -369,165 +371,228 @@ function drawDiagram(diagram: Diagram, outPath: string) {
   console.log(`Wrote ${outPath}`)
 }
 
-// --- Diagram definitions ---
+// --- Auto-generate diagram from VCF ---
 
-const deletion: Diagram = {
-  title: 'Deletion — segment B is lost',
-  cls: 'DEL',
-  refBars: [
-    {
-      label: 'chr1',
-      segments: [
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 2, deleted: true },
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
-      ],
-    },
-  ],
-  altBars: [
-    {
-      label: 'der(1)',
-      segments: [
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
-      ],
-    },
-  ],
-  connections: [
-    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 },
-    { refBar: 0, refSeg: 2, altBar: 0, altSeg: 1 },
-  ],
+function segmentLabel(index: number): string {
+  // A, B, C, ... Z, AA, AB, ...
+  if (index < 26) {
+    return String.fromCharCode(65 + index)
+  }
+  return String.fromCharCode(65 + Math.floor(index / 26) - 1) + String.fromCharCode(65 + (index % 26))
 }
 
-const inversion: Diagram = {
-  title: 'Inversion — segment B is reversed',
-  cls: 'INV',
-  refBars: [
-    {
-      label: 'chr1',
-      segments: [
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
-      ],
-    },
-  ],
-  altBars: [
-    {
-      label: 'der(1)',
-      segments: [
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 2, reversed: true },
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 1 },
-      ],
-    },
-  ],
-  connections: [
-    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 },
-    { refBar: 0, refSeg: 1, altBar: 0, altSeg: 1, reversed: true },
-    { refBar: 0, refSeg: 2, altBar: 0, altSeg: 2 },
-  ],
+function segmentColor(index: number): string {
+  return SEG_COLORS[index % SEG_COLORS.length]!
 }
 
-const translocation: Diagram = {
-  title: 'Translocation — chr1 and chr2 exchange tails',
-  cls: 'TRA',
-  refBars: [
-    {
-      label: '',
-      segments: [
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 2 },
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
-        { label: 'chr1 | chr2', color: '', proportion: 0.6, spacer: true },
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 2 },
-        { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
-      ],
-    },
-  ],
-  altBars: [
-    {
-      label: '',
-      segments: [
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 2 },
-        { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
-        { label: 'der(1) | der(2)', color: '', proportion: 0.6, spacer: true },
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 2 },
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
-      ],
-    },
-  ],
-  connections: [
-    // A stays in der(1)
-    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 },
-    // D moves to der(1)
-    { refBar: 0, refSeg: 4, altBar: 0, altSeg: 1 },
-    // C stays in der(2)
-    { refBar: 0, refSeg: 3, altBar: 0, altSeg: 3 },
-    // B moves to der(2)
-    { refBar: 0, refSeg: 1, altBar: 0, altSeg: 4 },
-  ],
+function classifyFromWalk(walk: WalkResult): string {
+  const chrs = new Set(walk.refSegments.map(s => s.chr))
+  if (chrs.size > 1 && walk.chains.length > 1) {
+    // Check if any chain spans multiple chromosomes
+    const hasMultiChr = walk.chains.some(chain => {
+      const chainChrs = new Set(chain.map(s => s.chr))
+      return chainChrs.size > 1
+    })
+    if (hasMultiChr && walk.refSegments.length <= 4) {
+      return 'TRA'
+    }
+    return 'COMPLEX'
+  }
+  if (walk.orphanIndices.length > 0) {
+    return 'DEL'
+  }
+  // Check for single-chain on one chromosome
+  if (walk.chains.length === 1 && chrs.size === 1) {
+    const chain = walk.chains[0]!
+    const hasReversed = chain.some(s => s.orientation === 'reverse')
+    if (hasReversed) {
+      return 'INV'
+    }
+  }
+  // Check for isolated segments (deletions)
+  if (walk.chains.some(c => c.length === 1)) {
+    return 'DEL'
+  }
+  return 'COMPLEX'
 }
 
-const complex: Diagram = {
-  title: 'Complex — chromothripsis-like rearrangement',
-  cls: 'COMPLEX',
-  refBars: [
-    {
-      label: '',
-      segments: [
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 2 },
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 2 },
-        { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
-        { label: 'E', color: SEG_COLORS[4]!, proportion: 1 },
-        { label: 'chr1 | chr2', color: '', proportion: 0.6, spacer: true },
-        { label: 'F', color: SEG_COLORS[5]!, proportion: 2 },
-        { label: 'G', color: '#a78bfa', proportion: 2 },
-        { label: 'H', color: '#f0abfc', proportion: 1 },
-      ],
-    },
-  ],
-  altBars: [
-    {
-      label: '',
-      segments: [
-        // Main derivative chain: A→D→G→C (one connected path through 3 junctions)
-        { label: 'A', color: SEG_COLORS[0]!, proportion: 1 },
-        { label: 'D', color: SEG_COLORS[3]!, proportion: 2 },
-        { label: 'G', color: '#a78bfa', proportion: 2 },
-        { label: 'C', color: SEG_COLORS[2]!, proportion: 2 },
-        {
-          label: 'derivative | remainders',
-          color: '',
-          proportion: 0.6,
-          spacer: true,
-        },
-        // Leftover tails (disconnected from main derivative)
-        { label: 'B', color: SEG_COLORS[1]!, proportion: 1.5, deleted: true },
-        { label: 'E', color: SEG_COLORS[4]!, proportion: 0.8 },
-        { label: 'F', color: SEG_COLORS[5]!, proportion: 1.5 },
-        { label: 'H', color: '#f0abfc', proportion: 0.8 },
-      ],
-    },
-  ],
-  connections: [
-    // Main derivative: A→D→G→C
-    { refBar: 0, refSeg: 0, altBar: 0, altSeg: 0 }, // A
-    { refBar: 0, refSeg: 3, altBar: 0, altSeg: 1 }, // D
-    { refBar: 0, refSeg: 7, altBar: 0, altSeg: 2 }, // G
-    { refBar: 0, refSeg: 2, altBar: 0, altSeg: 3 }, // C
-    // Remainders
-    { refBar: 0, refSeg: 1, altBar: 0, altSeg: 5 }, // B (lost)
-    { refBar: 0, refSeg: 4, altBar: 0, altSeg: 6 }, // E (tail)
-    { refBar: 0, refSeg: 6, altBar: 0, altSeg: 7 }, // F (tail)
-    { refBar: 0, refSeg: 8, altBar: 0, altSeg: 8 }, // H (tail)
-  ],
+function titleForClass(cls: string): string {
+  switch (cls) {
+    case 'DEL':
+      return 'Deletion'
+    case 'INV':
+      return 'Inversion'
+    case 'TRA':
+      return 'Translocation'
+    default:
+      return 'Complex rearrangement'
+  }
 }
 
-// --- Generate ---
-mkdirSync('img', { recursive: true })
-drawDiagram(deletion, 'img/deletion.png')
-drawDiagram(inversion, 'img/inversion.png')
-drawDiagram(translocation, 'img/translocation.png')
-drawDiagram(complex, 'img/complex.png')
-console.log('Done!')
+function buildDiagramFromWalk(walk: WalkResult, title?: string): Diagram {
+  const { refSegments, chains, orphanIndices } = walk
+  const orphanSet = new Set(orphanIndices)
+
+  // Group ref segments by chromosome
+  const chrSegMap = new Map<string, number[]>()
+  for (const seg of refSegments) {
+    if (!chrSegMap.has(seg.chr)) {
+      chrSegMap.set(seg.chr, [])
+    }
+    chrSegMap.get(seg.chr)!.push(seg.index)
+  }
+  const chrNames = [...chrSegMap.keys()].sort()
+
+  // Build ref bar(s) — one bar with spacers between chromosomes
+  const refBarSegs: Seg[] = []
+  // Map from segment index → position in the flat ref bar
+  const refSegPosition = new Map<number, { barIndex: number; segIndex: number }>()
+
+  for (let ci = 0; ci < chrNames.length; ci++) {
+    if (ci > 0) {
+      refBarSegs.push({
+        label: chrNames.slice(0, ci + 1).join(' | '),
+        color: '',
+        proportion: 0.6,
+        spacer: true,
+      })
+    }
+    const indices = chrSegMap.get(chrNames[ci]!)!
+    for (const idx of indices) {
+      const seg = refSegments[idx]!
+      const segIdx = refBarSegs.length
+      refBarSegs.push({
+        label: segmentLabel(idx),
+        color: segmentColor(idx),
+        proportion: seg.end - seg.start,
+        segmentIndex: idx,
+      })
+      refSegPosition.set(idx, { barIndex: 0, segIndex: segIdx })
+    }
+  }
+
+  const refBars: Bar[] = [{ label: '', segments: refBarSegs }]
+
+  // Build alt bar(s) — separate derivative chains and orphans
+  const altBars: Bar[] = []
+  const connections: Conn[] = []
+
+  // Main derivative chains (multi-segment)
+  const mainChains = chains.filter(c => c.length > 1)
+  const isolatedChains = chains.filter(c => c.length === 1)
+
+  for (let ci = 0; ci < mainChains.length; ci++) {
+    const chain = mainChains[ci]!
+    const altBarIdx = altBars.length
+    const altSegs: Seg[] = []
+
+    for (const ws of chain) {
+      const altSegIdx = altSegs.length
+      altSegs.push({
+        label: segmentLabel(ws.segmentIndex),
+        color: segmentColor(ws.segmentIndex),
+        proportion: ws.end - ws.start,
+        reversed: ws.orientation === 'reverse',
+        segmentIndex: ws.segmentIndex,
+      })
+
+      const refPos = refSegPosition.get(ws.segmentIndex)
+      if (refPos) {
+        connections.push({
+          refBar: refPos.barIndex,
+          refSeg: refPos.segIndex,
+          altBar: altBarIdx,
+          altSeg: altSegIdx,
+          reversed: ws.orientation === 'reverse',
+        })
+      }
+    }
+
+    const chainChrs = [...new Set(chain.map(s => s.chr))]
+    const label = mainChains.length > 1 ? `der ${ci + 1}` : 'der'
+    altBars.push({ label, segments: altSegs })
+  }
+
+  // Isolated and orphaned segments in a separate bar
+  const remainders: WalkSegment[] = []
+  for (const chain of isolatedChains) {
+    for (const seg of chain) {
+      remainders.push(seg)
+    }
+  }
+  for (const idx of orphanIndices) {
+    const seg = refSegments[idx]!
+    remainders.push({
+      chr: seg.chr,
+      start: seg.start,
+      end: seg.end,
+      orientation: 'forward',
+      segmentIndex: idx,
+    })
+  }
+
+  if (remainders.length > 0) {
+    const altBarIdx = altBars.length
+    const remSegs: Seg[] = []
+
+    for (const ws of remainders) {
+      const altSegIdx = remSegs.length
+      const isOrphan = orphanSet.has(ws.segmentIndex)
+      // Isolated single-segment chains are also "remainders"
+      const isIsolated = isolatedChains.some(c => c.length === 1 && c[0]!.segmentIndex === ws.segmentIndex)
+
+      remSegs.push({
+        label: segmentLabel(ws.segmentIndex),
+        color: segmentColor(ws.segmentIndex),
+        proportion: ws.end - ws.start,
+        deleted: isOrphan || isIsolated,
+        segmentIndex: ws.segmentIndex,
+      })
+
+      const refPos = refSegPosition.get(ws.segmentIndex)
+      if (refPos) {
+        connections.push({
+          refBar: refPos.barIndex,
+          refSeg: refPos.segIndex,
+          altBar: altBarIdx,
+          altSeg: altSegIdx,
+        })
+      }
+    }
+
+    altBars.push({ label: 'other', segments: remSegs })
+  }
+
+  const cls = classifyFromWalk(walk)
+
+  return {
+    title: title ?? titleForClass(cls),
+    cls,
+    refBars,
+    altBars,
+    connections,
+  }
+}
+
+// --- CLI ---
+const args = process.argv.slice(2)
+
+if (args.length < 2) {
+  console.error('Usage: visualize.ts <input.vcf> <output.png> [--title "..."]')
+  process.exit(1)
+}
+
+const vcfPath = args[0]!
+const outPath = args[1]!
+
+let title: string | undefined
+const titleIdx = args.indexOf('--title')
+if (titleIdx !== -1 && args[titleIdx + 1]) {
+  title = args[titleIdx + 1]
+}
+
+const vcf = readFileSync(vcfPath, 'utf-8')
+const breakends = parseVcfLines(vcf.split('\n'))
+const walk = walkBreakends(breakends)
+const diagram = buildDiagramFromWalk(walk, title)
+drawDiagram(diagram, outPath)

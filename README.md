@@ -16,39 +16,128 @@ from VCF breakends and extract it to a standalone utility.
 
 ## Visualizations
 
-The diagrams below show how breakend pairs define structural variants. Triangles
-indicate breakend orientation (+1 green = faces right, -1 red = faces left).
-Dashed arcs connect mate pairs.
+These diagrams are **auto-generated** from VCF fixture files using the walk
+algorithm in `src/walk.ts`. Each diagram shows the reference genome (REF) on top
+and the reconstructed derivative genome (ALT) below. Colored segments (A, B,
+C...) represent reference regions between breakpoints. Curved ribbons connect
+each segment from its reference position to its position in the derivative.
+Chevrons indicate strand orientation (right-pointing = forward, left-pointing =
+reversed). Dashed segments in the "other" row are orphaned or lost.
+
+Usage:
+
+```bash
+node scripts/visualize.ts <input.vcf> <output.png> [--title "..."]
+```
 
 ### Deletion
 
-Two breakends face inward — the reference segment between them is lost.
+Two breakends face inward (`A[chr1:2000[` and `]chr1:1000]C`) — the reference
+segment between them is lost.
+
+```
+#CHROM  POS   ID     REF  ALT            INFO
+chr1    1000  bnd_a  A    A[chr1:2000[   SVTYPE=BND;MATEID=bnd_b;EVENT=del1
+chr1    2000  bnd_b  C    ]chr1:1000]C   SVTYPE=BND;MATEID=bnd_a;EVENT=del1
+```
+
+Walk result: A(fwd) → C(fwd). Segment B is lost.
+
+```bash
+node scripts/visualize.ts test/fixtures/deletion.vcf img/deletion.png --title "Deletion — segment B is lost"
+```
 
 ![Deletion](img/deletion.png)
 
 ### Inversion
 
-Two breakends face the same direction — the segment between them is reversed.
+Four breakends (two pairs) at the same positions but opposite orientations. The
+first pair (`A]chr1:2000]` / `C]chr1:1000]`) has both breakends facing right
+(+1), and the second pair (`]chr1:2000]A` / `]chr1:1000]C`) has both facing left
+(-1). Together they sever both sides of the segment, reversing it.
+
+```
+#CHROM  POS   ID     REF  ALT            INFO
+chr1    1000  bnd_a  A    A]chr1:2000]   SVTYPE=BND;MATEID=bnd_b;EVENT=inv1
+chr1    2000  bnd_b  C    C]chr1:1000]   SVTYPE=BND;MATEID=bnd_a;EVENT=inv1
+chr1    1000  bnd_c  A    ]chr1:2000]A   SVTYPE=BND;MATEID=bnd_d;EVENT=inv1
+chr1    2000  bnd_d  C    ]chr1:1000]C   SVTYPE=BND;MATEID=bnd_c;EVENT=inv1
+```
+
+Walk result: A(fwd) → B(rev) → C(fwd).
+
+```bash
+node scripts/visualize.ts test/fixtures/inversion.vcf img/inversion.png --title "Inversion — segment B is reversed"
+```
 
 ![Inversion](img/inversion.png)
 
-### Translocation
+### Balanced translocation
 
-Breakends on different chromosomes — sequence from one chromosome joins another.
+A reciprocal translocation requires two breakend pairs (4 records). The first
+pair connects chr1:1000(+1) to chr2:3000(-1), and the second connects
+chr1:1000(-1) to chr2:3000(+1). Both sides of each breakpoint are severed and
+reconnected to the other chromosome.
 
-![Translocation](img/translocation.png)
+```
+#CHROM  POS   ID     REF  ALT            INFO
+chr1    1000  bnd_a  A    A[chr2:3000[   SVTYPE=BND;MATEID=bnd_b;EVENT=tra1
+chr2    3000  bnd_b  C    ]chr1:1000]C   SVTYPE=BND;MATEID=bnd_a;EVENT=tra1
+chr1    1000  bnd_c  A    [chr2:3000[A   SVTYPE=BND;MATEID=bnd_d;EVENT=tra1
+chr2    3000  bnd_d  C    C]chr1:1000]   SVTYPE=BND;MATEID=bnd_c;EVENT=tra1
+```
+
+Walk result: der 1 = A(fwd) → D(fwd), der 2 = C(fwd) → B(fwd).
+
+```bash
+node scripts/visualize.ts test/fixtures/translocation.vcf img/translocation.png --title "Balanced translocation — chr1 and chr2 exchange tails"
+```
+
+![Balanced translocation](img/translocation.png)
+
+### Unbalanced translocation
+
+Only one breakend pair — an incomplete picture. Only one derivative chromosome
+can be reconstructed; the remaining tails of each chromosome are orphaned
+because there is no second junction to connect them.
+
+```
+#CHROM  POS   ID     REF  ALT            INFO
+chr1    1000  bnd_a  A    A[chr2:3000[   SVTYPE=BND;MATEID=bnd_b;EVENT=tra1
+chr2    3000  bnd_b  C    ]chr1:1000]C   SVTYPE=BND;MATEID=bnd_a;EVENT=tra1
+```
+
+Walk result: der = A(fwd) → D(fwd). Segments B and C are orphaned.
+
+```bash
+node scripts/visualize.ts test/fixtures/unbalanced_translocation.vcf img/unbalanced_translocation.png --title "Unbalanced translocation — one junction, incomplete picture"
+```
+
+![Unbalanced translocation](img/unbalanced_translocation.png)
 
 ### Complex rearrangement
 
-Multiple breakend pairs across chromosomes form a multi-breakpoint chain.
+Three breakend pairs across two chromosomes (6 BND records). The walk algorithm
+traces three derivative chains and identifies two lost segments.
 
-![Complex](img/complex.png)
+```
+#CHROM  POS   ID     REF  ALT            INFO
+chr1    1000  bnd_a  A    A[chr1:5000[   SVTYPE=BND;MATEID=bnd_b;EVENT=cx1
+chr1    5000  bnd_b  C    ]chr1:1000]C   SVTYPE=BND;MATEID=bnd_a;EVENT=cx1
+chr1    3000  bnd_c  G    G[chr2:8000[   SVTYPE=BND;MATEID=bnd_d;EVENT=cx2
+chr2    8000  bnd_d  T    ]chr1:3000]T   SVTYPE=BND;MATEID=bnd_c;EVENT=cx2
+chr2    6000  bnd_e  A    A[chr1:7000[   SVTYPE=BND;MATEID=bnd_f;EVENT=cx3
+chr1    7000  bnd_f  C    ]chr2:6000]C   SVTYPE=BND;MATEID=bnd_e;EVENT=cx3
+```
 
-To regenerate these images:
+Walk result: der 1 = A(fwd) → D(fwd), der 2 = B(fwd) → H(fwd), der 3 = F(fwd) →
+E(fwd). Segments C and G are lost.
 
 ```bash
-node --experimental-strip-types scripts/visualize.ts
+node scripts/visualize.ts test/fixtures/complex.vcf img/complex.png --title "Complex — chromothripsis-like rearrangement"
 ```
+
+![Complex](img/complex.png)
 
 ## Algorithm
 
@@ -300,19 +389,18 @@ discarding it and forcing downstream tools to re-derive it heuristically.
 ### How simple are "simple" SVs?
 
 Before asking whether VCF needs to change, it is worth questioning the premise
-that most SVs are simple. The major biological mechanisms that produce SVs
-each introduce complexity that VCF's interval-based notation tends to flatten:
+that most SVs are simple. The major biological mechanisms that produce SVs each
+introduce complexity that VCF's interval-based notation tends to flatten:
 
 - **NAHR** (non-allelic homologous recombination between repeats) produces
-  deletions, duplications, and inversions — but the duplications are
-  frequently inverted duplications (the new copy is in reverse orientation),
-  and inversions commonly have flanking copy number changes. A "clean"
-  inversion with precise breakpoints and no copy number change is actually
-  rare.
+  deletions, duplications, and inversions — but the duplications are frequently
+  inverted duplications (the new copy is in reverse orientation), and inversions
+  commonly have flanking copy number changes. A "clean" inversion with precise
+  breakpoints and no copy number change is actually rare.
 - **FoSTeS / MMBIR** (replication-based fork stalling and template switching)
   produces inverted duplications, complex insertions, and templated insertions
-  from other chromosomes. These get called as "a DUP" by short-read callers
-  but are mechanistically multi-breakpoint events.
+  from other chromosomes. These get called as "a DUP" by short-read callers but
+  are mechanistically multi-breakpoint events.
 - **NHEJ** (non-homologous end joining) can produce deletions and
   translocations, but frequently with non-templated sequence inserted at the
   junction — information that VCF's simple interval notation does not capture.
@@ -328,42 +416,42 @@ population SVs are complex even with short reads, and long-read analyses find
 significantly higher fractions. Many "inversions" turn out to be inverted
 duplications. Many "deletions" have inserted sequence at the junction.
 
-So "most SVs are simple" is more accurately "most SVs are **called** as
-simple" — partly an artifact of short-read caller limitations and partly a
-consequence of VCF encouraging interval-based thinking. This matters for the
-format question: if the underlying biology is frequently complex, a format
-that can only naturally represent simple events pushes the entire ecosystem
-toward underrepresenting that complexity.
+So "most SVs are simple" is more accurately "most SVs are **called** as simple"
+— partly an artifact of short-read caller limitations and partly a consequence
+of VCF encouraging interval-based thinking. This matters for the format
+question: if the underlying biology is frequently complex, a format that can
+only naturally represent simple events pushes the entire ecosystem toward
+underrepresenting that complexity.
 
 ### Should we extend VCF or adopt a graph format?
 
 The honest answer is both, for different reasons and on different timelines.
 
-**The case for extending VCF is pragmatic.** The ecosystem is enormous: every
-SV caller, annotation tool, database, and clinical pipeline speaks VCF. Adding
-optional INFO tags (JCN, CHAIN, CIS_LINK) is low cost, backward compatible,
-and immediately useful. Old tools ignore tags they don't recognize. The
-information is already being computed and thrown away: GRIDSS knows which
-breakpoints are assembly-linked, long-read callers know phasing, LINX knows
-chain order. They just have no standard place to put it.
+**The case for extending VCF is pragmatic.** The ecosystem is enormous: every SV
+caller, annotation tool, database, and clinical pipeline speaks VCF. Adding
+optional INFO tags (JCN, CHAIN, CIS_LINK) is low cost, backward compatible, and
+immediately useful. Old tools ignore tags they don't recognize. The information
+is already being computed and thrown away: GRIDSS knows which breakpoints are
+assembly-linked, long-read callers know phasing, LINX knows chain order. They
+just have no standard place to put it.
 
-**But VCF is fundamentally position-sorted and variant-centric.** It
-represents differences from a reference at specific positions. A derivative
-chromosome is not a position — it is a path through a rearranged graph.
-Bolting path semantics onto a position-based format will always be awkward. The
-BND notation is already the most confusing part of the VCF spec, and adding
-more tags increases that complexity. Graph formats like GFA handle this
-natively: segments (reference pieces), links (adjacencies), and paths (ordered
-walks). A derivative chromosome is literally a GFA path. And given that even
-"simple" SVs are often more complex than they appear, the fraction of variants
-that would benefit from graph representation is larger than it first seems.
+**But VCF is fundamentally position-sorted and variant-centric.** It represents
+differences from a reference at specific positions. A derivative chromosome is
+not a position — it is a path through a rearranged graph. Bolting path semantics
+onto a position-based format will always be awkward. The BND notation is already
+the most confusing part of the VCF spec, and adding more tags increases that
+complexity. Graph formats like GFA handle this natively: segments (reference
+pieces), links (adjacencies), and paths (ordered walks). A derivative chromosome
+is literally a GFA path. And given that even "simple" SVs are often more complex
+than they appear, the fraction of variants that would benefit from graph
+representation is larger than it first seems.
 
 **The field is already moving toward graph references.** The Human Pangenome
 Reference Consortium (HPRC) is building pangenome graphs. Tools like
 minigraph-cactus and vg represent variation as graphs natively. As graph
 references become mainstream, SV calling naturally becomes "find paths in this
-graph that differ from the reference path," and the output is also a
-graph/path rather than a set of position-based variant records.
+graph that differ from the reference path," and the output is also a graph/path
+rather than a set of position-based variant records.
 
 A pragmatic path forward:
 
@@ -373,31 +461,31 @@ A pragmatic path forward:
 - **Medium term**: Tools that reconstruct derivative chromosomes should support
   dual output — VCF for compatibility and a graph format for full
   expressiveness. No existing graph format is designed specifically for somatic
-  SV output (GFA is for assembly graphs, rGFA adds reference coordinates, GAF
-  is for alignments). A purpose-built "variant graph format" for the SV
-  calling use case does not yet exist.
-- **Long term**: As pangenome graphs become standard for germline variation,
-  the pressure to keep everything in VCF will decrease. Complex somatic SVs
+  SV output (GFA is for assembly graphs, rGFA adds reference coordinates, GAF is
+  for alignments). A purpose-built "variant graph format" for the SV calling use
+  case does not yet exist.
+- **Long term**: As pangenome graphs become standard for germline variation, the
+  pressure to keep everything in VCF will decrease. Complex somatic SVs
   (chromothripsis, chromoplexy, breakage-fusion-bridge cycles) are the cases
-  where graphs matter most, and those are also the cases where VCF is worst.
-  But the "simple SV" category is also larger than it appears — inverted
+  where graphs matter most, and those are also the cases where VCF is worst. But
+  the "simple SV" category is also larger than it appears — inverted
   duplications, complex inversions, and deletions-with-insertions would all
   benefit from graph representation. The question is less "which SVs need
   graphs" and more "when will the tooling make graph formats practical."
 
-The key principle is: don't try to make VCF into a graph format. That fights
-the design. Instead, make VCF good enough for backward compatibility and
-clinical workflows (with optional tags for callers that can provide chain
-info), and develop graph formats for the cases where positional representation
-is lossy — which, given the biology, is more cases than the SV tooling
-ecosystem currently acknowledges.
+The key principle is: don't try to make VCF into a graph format. That fights the
+design. Instead, make VCF good enough for backward compatibility and clinical
+workflows (with optional tags for callers that can provide chain info), and
+develop graph formats for the cases where positional representation is lossy —
+which, given the biology, is more cases than the SV tooling ecosystem currently
+acknowledges.
 
 The biggest risk is fragmentation: if multiple competing graph formats emerge
-and none achieves adoption, the ecosystem is worse off than the status quo.
-The pangenome community converging on GFA/rGFA is encouraging because it
-provides a natural home for SV paths, but someone still needs to define
-conventions for how somatic SVs — with copy number, clonality, and
-uncertainty — map onto GFA concepts.
+and none achieves adoption, the ecosystem is worse off than the status quo. The
+pangenome community converging on GFA/rGFA is encouraging because it provides a
+natural home for SV paths, but someone still needs to define conventions for how
+somatic SVs — with copy number, clonality, and uncertainty — map onto GFA
+concepts.
 
 ## Tests
 

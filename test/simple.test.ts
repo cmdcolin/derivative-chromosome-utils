@@ -5,6 +5,7 @@ import { buildGraph } from '../src/buildGraph.ts'
 import { buildChains } from '../src/chain.ts'
 import { classifyChain } from '../src/classify.ts'
 import { deriveChromosomes } from '../src/deriveChromosomes.ts'
+import { walkBreakends } from '../src/walk.ts'
 
 function loadFixture(name: string) {
   const content = readFileSync(
@@ -32,22 +33,27 @@ describe('parseBreakends', () => {
 
   it('parses inversion BND records', () => {
     const breakends = parseVcfLines(loadFixture('inversion.vcf'))
-    expect(breakends).toHaveLength(2)
-    // A]chr1:2000] → extends right of A, mate faces left → orientation +1, mateOrientation -1
+    expect(breakends).toHaveLength(4)
+    // First pair: A]chr1:2000] / C]chr1:1000] — both orient +1
     expect(breakends[0]!.orientation).toBe(1)
     expect(breakends[0]!.mateOrientation).toBe(-1)
-    // C]chr1:1000] → extends right of C, mate faces left → orientation +1, mateOrientation -1
     expect(breakends[1]!.orientation).toBe(1)
     expect(breakends[1]!.mateOrientation).toBe(-1)
+    // Second pair: ]chr1:2000]A / ]chr1:1000]C — both orient -1
+    expect(breakends[2]!.orientation).toBe(-1)
+    expect(breakends[3]!.orientation).toBe(-1)
   })
 
   it('parses translocation BND records', () => {
     const breakends = parseVcfLines(loadFixture('translocation.vcf'))
-    expect(breakends).toHaveLength(2)
+    expect(breakends).toHaveLength(4)
     expect(breakends[0]!.chr).toBe('chr1')
     expect(breakends[0]!.mateChr).toBe('chr2')
     expect(breakends[1]!.chr).toBe('chr2')
     expect(breakends[1]!.mateChr).toBe('chr1')
+    // Second pair for reciprocal translocation
+    expect(breakends[2]!.orientation).toBe(-1)
+    expect(breakends[3]!.orientation).toBe(1)
   })
 })
 
@@ -96,5 +102,60 @@ describe('classifyChain', () => {
     const chain = result.chains[0]!
     const cls = classifyChain(chain)
     expect(cls).toBe('TRA')
+  })
+})
+
+describe('walkBreakends', () => {
+  it('walks deletion to produce A→C with B orphaned', () => {
+    const breakends = parseVcfLines(loadFixture('deletion.vcf'))
+    const walk = walkBreakends(breakends)
+    expect(walk.refSegments).toHaveLength(3)
+    expect(walk.chains).toHaveLength(2)
+    // Main chain: A→C
+    const main = walk.chains[0]!
+    expect(main).toHaveLength(2)
+    expect(main[0]!.orientation).toBe('forward')
+    expect(main[1]!.orientation).toBe('forward')
+    // Isolated: B
+    expect(walk.chains[1]).toHaveLength(1)
+  })
+
+  it('walks inversion to produce A→B(rev)→C', () => {
+    const breakends = parseVcfLines(loadFixture('inversion.vcf'))
+    const walk = walkBreakends(breakends)
+    expect(walk.refSegments).toHaveLength(3)
+    expect(walk.chains).toHaveLength(1)
+    const chain = walk.chains[0]!
+    expect(chain).toHaveLength(3)
+    expect(chain[0]!.orientation).toBe('forward')
+    expect(chain[1]!.orientation).toBe('reverse')
+    expect(chain[2]!.orientation).toBe('forward')
+  })
+
+  it('walks translocation to produce two derivative chromosomes', () => {
+    const breakends = parseVcfLines(loadFixture('translocation.vcf'))
+    const walk = walkBreakends(breakends)
+    expect(walk.refSegments).toHaveLength(4)
+    expect(walk.chains).toHaveLength(2)
+    // der1: chr1:A + chr2:D
+    const der1 = walk.chains[0]!
+    expect(der1).toHaveLength(2)
+    expect(der1[0]!.chr).toBe('chr1')
+    expect(der1[1]!.chr).toBe('chr2')
+    // der2: chr2:C + chr1:B
+    const der2 = walk.chains[1]!
+    expect(der2).toHaveLength(2)
+    expect(der2[0]!.chr).toBe('chr2')
+    expect(der2[1]!.chr).toBe('chr1')
+  })
+
+  it('walks complex rearrangement', () => {
+    const breakends = parseVcfLines(loadFixture('complex.vcf'))
+    const walk = walkBreakends(breakends)
+    expect(walk.refSegments).toHaveLength(8)
+    // 3 multi-segment derivatives + 2 isolated segments
+    expect(walk.chains).toHaveLength(5)
+    const multiChains = walk.chains.filter(c => c.length > 1)
+    expect(multiChains).toHaveLength(3)
   })
 })

@@ -1,0 +1,7 @@
+##fileformat=VCFv4.3
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=MATEID,Number=1,Type=String,Description="ID of mate breakend">
+##INFO=<ID=EVENT,Number=1,Type=String,Description="Event identifier">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	2000	bnd_a	C	C]chr1:1000]	.	PASS	SVTYPE=BND;MATEID=bnd_b;EVENT=dup1
+chr1	1000	bnd_b	A	[chr1:2000[A	.	PASS	SVTYPE=BND;MATEID=bnd_a;EVENT=dup1

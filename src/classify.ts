@@ -15,6 +15,11 @@ export function classifyChain(chain: Chain): SVClass {
       return 'TRA'
     }
 
+    // Check if the segment between the breakends is on a different chromosome
+    if (chain.segments.length === 1 && chain.segments[0]!.chr !== b1.chr) {
+      return 'TRA'
+    }
+
     const [lower, upper] = b1.pos <= b2.pos ? [b1, b2] : [b2, b1]
 
     // DEL: lower faces right (+1), upper faces left (-1)
